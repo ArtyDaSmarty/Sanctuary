@@ -419,6 +419,69 @@ class VoiceManager {
     }
   }
 
+  /**
+   * Soft-leave: clean up local voice state WITHOUT emitting to the server.
+   * Used when the socket disconnects unexpectedly (e.g. mobile screen timeout)
+   * so the client state is reset and the auto-rejoin on reconnect can work.
+   * Intentionally keeps haven_voice_channel in localStorage for that rejoin.
+   */
+  _softLeave() {
+    if (!this.inVoice) return;
+
+    // Stop screen share / webcam (local cleanup only)
+    if (this.isScreenSharing && this.screenStream) {
+      this.screenStream.getTracks().forEach(t => t.stop());
+      this.screenStream = null;
+      this.isScreenSharing = false;
+    }
+    if (this.isWebcamActive && this.webcamStream) {
+      this.webcamStream.getTracks().forEach(t => t.stop());
+      this.webcamStream = null;
+      this.isWebcamActive = false;
+    }
+
+    this._stopNoiseGate();
+    this._stopLocalTalkDetection();
+    for (const [id] of this.analysers) this._stopAnalyser(id);
+
+    for (const [id] of this.peers) {
+      this._removePeer(id);
+    }
+    this.gainNodes.clear();
+
+    if (this.rawStream) {
+      this.rawStream.getTracks().forEach(t => t.stop());
+      this.rawStream = null;
+    }
+    if (this.localStream) {
+      this.localStream.getTracks().forEach(t => t.stop());
+      this.localStream = null;
+    }
+
+    this.currentChannel = null;
+    this.inVoice = false;
+    this.isMuted = false;
+    this.isDeafened = false;
+    this.screenSharers.clear();
+    this.screenGainNodes.clear();
+    this.webcamUsers.clear();
+    this._vcDest = null;
+
+    if (this.audioCtx) {
+      this.audioCtx.close().catch(() => {});
+      this.audioCtx = null;
+    }
+    this._cachedSilentTrack = null;
+
+    if (this._disconnectTimers) {
+      for (const key of Object.keys(this._disconnectTimers)) {
+        clearTimeout(this._disconnectTimers[key]);
+      }
+      this._disconnectTimers = {};
+    }
+    // NOTE: leaves haven_voice_channel in localStorage so auto-rejoin on reconnect works
+  }
+
   // Play a soundboard audio file and mix it into the VC stream so other users hear it
   playSoundToVC(url, localVolume = 0.5) {
     if (!this.inVoice || !this.audioCtx || !this._vcDest) return false;

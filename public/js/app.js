@@ -364,6 +364,14 @@ class HavenApp {
       this._setLed('status-server-led', 'danger pulse');
       document.getElementById('status-server-text').textContent = 'Disconnected';
       document.getElementById('status-ping').textContent = '--';
+      // Mobile fix: if we were in voice when the socket dropped, clean up local
+      // voice state so the UI resets and auto-rejoin can work on reconnect.
+      if (this.voice && this.voice.inVoice) {
+        this.voice._softLeave();
+        this._updateVoiceButtons(false);
+        this._updateVoiceStatus(false);
+        this._updateVoiceBar();
+      }
     });
 
     this.socket.on('connect_error', (err) => {
@@ -3687,6 +3695,9 @@ class HavenApp {
 
   async _uploadImage(file) {
     if (!this.currentChannel) return;
+    // Capture the target channel NOW (before any await) so a mid-upload channel
+    // switch doesn't send the image to the wrong channel.
+    const targetChannel = this.currentChannel;
     const _maxMb = parseInt(this.serverSettings?.max_upload_mb) || 25;
     if (file.size > _maxMb * 1024 * 1024) {
       return this._showToast(`Image too large (max ${_maxMb} MB)`, 'error');
@@ -3709,9 +3720,9 @@ class HavenApp {
       }
       const data = await res.json();
 
-      // Send the image URL as a message (prefix with img: to avoid slash-command parsing)
+      // Send the image URL as a message to the channel that was active at upload time
       this.socket.emit('send-message', {
-        code: this.currentChannel,
+        code: targetChannel,
         content: data.url,
         isImage: true
       });
@@ -12623,6 +12634,11 @@ class HavenApp {
     document.querySelectorAll('.settings-nav-admin').forEach(el => {
       el.style.display = isAdmin ? '' : 'none';
     });
+    // Show the Emojis settings tab for users with manage_emojis permission even if not full admin/mod
+    const emojiNavItem = document.querySelector('.settings-nav-item[data-target="section-emojis"]');
+    if (emojiNavItem && !isAdmin && this._hasPerm('manage_emojis')) {
+      emojiNavItem.style.display = '';
+    }
   }
 
   _snapshotAdminSettings() {
@@ -14524,7 +14540,7 @@ class HavenApp {
       'pin_message', 'archive_messages', 'kick_user', 'mute_user', 'ban_user',
       'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
       'create_channel', 'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-      'promote_user', 'transfer_admin'
+      'manage_emojis', 'promote_user', 'transfer_admin'
     ];
     const permLabels = {
       edit_own_messages: 'Edit Own Messages', delete_own_messages: 'Delete Own Messages',
@@ -14537,6 +14553,7 @@ class HavenApp {
       upload_files: 'Upload Files', use_voice: 'Use Voice Chat',
       manage_webhooks: 'Manage Webhooks', mention_everyone: 'Mention @everyone',
       view_history: 'View Message History',
+      manage_emojis: 'Manage Custom Emojis',
       promote_user: 'Promote Users', transfer_admin: 'Transfer Admin'
     };
     const rolePerms = role.permissions || [];
@@ -14936,7 +14953,7 @@ class HavenApp {
       'pin_message', 'archive_messages', 'kick_user', 'mute_user', 'ban_user',
       'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
       'create_channel', 'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-      'promote_user', 'transfer_admin'
+      'manage_emojis', 'promote_user', 'transfer_admin'
     ];
     const permLabels = {
       edit_own_messages: 'Edit Own Messages', delete_own_messages: 'Delete Own Messages',
@@ -14949,6 +14966,7 @@ class HavenApp {
       upload_files: 'Upload Files', use_voice: 'Use Voice Chat',
       manage_webhooks: 'Manage Webhooks', mention_everyone: 'Mention @everyone',
       view_history: 'View Message History',
+      manage_emojis: 'Manage Custom Emojis',
       promote_user: 'Promote Users', transfer_admin: 'Transfer Admin'
     };
     const rolePerms = role.permissions || [];
@@ -15329,7 +15347,7 @@ class HavenApp {
       'pin_message', 'archive_messages', 'kick_user', 'mute_user', 'ban_user',
       'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
       'create_channel', 'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-      'promote_user', 'transfer_admin'
+      'manage_emojis', 'promote_user', 'transfer_admin'
     ];
     // Perms that only admin can grant
     const adminOnlyPerms = ['transfer_admin'];
@@ -15345,6 +15363,7 @@ class HavenApp {
       upload_files: 'Upload Files',
       use_voice: 'Use Voice', manage_webhooks: 'Manage Webhooks',
       mention_everyone: 'Mention Everyone', view_history: 'View History',
+      manage_emojis: 'Manage Custom Emojis',
       promote_user: 'Promote Users', transfer_admin: 'Transfer Admin'
     };
 
@@ -16397,6 +16416,15 @@ class HavenApp {
         } else {
           msg.content = '[Encrypted — unable to decrypt]';
           msg._e2e = true;
+        }
+      }
+      // Also decrypt the reply preview text if the replied-to message was encrypted
+      if (msg.replyContext && msg.replyContext.content && HavenE2E.isEncrypted(msg.replyContext.content)) {
+        if (!partnerJwk) {
+          msg.replyContext.content = '[Encrypted — waiting for key...]';
+        } else {
+          const rplain = await this.e2e.decrypt(msg.replyContext.content, partnerId, partnerJwk);
+          msg.replyContext.content = rplain !== null ? rplain : '[Encrypted — unable to decrypt]';
         }
       }
     }

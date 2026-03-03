@@ -70,6 +70,23 @@ function verifyAdminFromDb(user) {
   } catch { return false; }
 }
 
+function userHasPermission(userId, permission) {
+  if (!userId) return false;
+  try {
+    const { getDb } = require('./src/database');
+    const isAdmin = getDb().prepare('SELECT is_admin FROM users WHERE id = ?').get(userId);
+    if (isAdmin && isAdmin.is_admin) return true;
+    const row = getDb().prepare(`
+      SELECT 1 FROM role_permissions rp
+      JOIN roles r ON rp.role_id = r.id
+      JOIN user_roles ur ON r.id = ur.role_id
+      WHERE ur.user_id = ? AND rp.permission = ? AND rp.allowed = 1
+      LIMIT 1
+    `).get(userId, permission);
+    return !!row;
+  } catch { return false; }
+}
+
 // ── Security Headers (helmet) ────────────────────────────
 app.use(helmet({
   contentSecurityPolicy: {
@@ -911,7 +928,7 @@ app.post('/api/upload-emoji', uploadLimiter, (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   const user = token ? verifyToken(token) : null;
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  if (!verifyAdminFromDb(user)) return res.status(403).json({ error: 'Admin only' });
+  if (!verifyAdminFromDb(user) && !userHasPermission(user.id, 'manage_emojis')) return res.status(403).json({ error: 'Requires admin or Manage Emojis permission' });
 
   emojiUpload.single('emoji')(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
@@ -946,7 +963,7 @@ app.delete('/api/emojis/:name', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   const user = token ? verifyToken(token) : null;
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  if (!verifyAdminFromDb(user)) return res.status(403).json({ error: 'Admin only' });
+  if (!verifyAdminFromDb(user) && !userHasPermission(user.id, 'manage_emojis')) return res.status(403).json({ error: 'Requires admin or Manage Emojis permission' });
   const name = req.params.name;
   const { getDb } = require('./src/database');
   try {
