@@ -253,7 +253,7 @@ class HavenApp {
       if (this.user.isAdmin) {
         document.getElementById('admin-mod-panel').style.display = 'block';
       } else {
-        document.getElementById('admin-mod-panel').style.display = canModerate ? 'block' : 'none';
+        document.getElementById('admin-mod-panel').style.display = (canModerate || this._hasPerm('manage_emojis') || this._hasPerm('manage_soundboard')) ? 'block' : 'none';
       }
     });
 
@@ -267,7 +267,7 @@ class HavenApp {
       const canModerate = this.user.isAdmin || this.user.effectiveLevel >= 25;
       const canCreateChannel = this.user.isAdmin || this._hasPerm('create_channel');
       document.getElementById('admin-controls').style.display = canCreateChannel ? 'block' : 'none';
-      document.getElementById('admin-mod-panel').style.display = canModerate ? 'block' : 'none';
+      document.getElementById('admin-mod-panel').style.display = (canModerate || this._hasPerm('manage_emojis') || this._hasPerm('manage_soundboard')) ? 'block' : 'none';
       this._showToast('Your roles have been updated', 'info');
     });
 
@@ -4161,9 +4161,9 @@ class HavenApp {
   _openSoundModal(tab = 'soundboard') {
     const modal = document.getElementById('sound-modal');
     if (!modal) return;
-    // Show admin tab only if user is admin
+    // Show admin tab only if user is admin or has manage_soundboard permission
     const adminTab = modal.querySelector('.sound-tab-admin');
-    if (adminTab) adminTab.style.display = this.user?.is_admin ? '' : 'none';
+    if (adminTab) adminTab.style.display = (this.user?.is_admin || this._hasPerm('manage_soundboard')) ? '' : 'none';
     // Activate requested tab
     modal.querySelectorAll('.sound-tab').forEach(t => t.classList.remove('active'));
     modal.querySelectorAll('.sound-tab-content').forEach(c => c.classList.remove('active'));
@@ -12639,6 +12639,11 @@ class HavenApp {
     if (emojiNavItem && !isAdmin && this._hasPerm('manage_emojis')) {
       emojiNavItem.style.display = '';
     }
+    // Show the Sounds admin tab for users with manage_soundboard permission
+    const soundsNavItem = document.querySelector('.settings-nav-item[data-target="section-sounds-admin"]');
+    if (soundsNavItem && !isAdmin && this._hasPerm('manage_soundboard')) {
+      soundsNavItem.style.display = '';
+    }
   }
 
   _snapshotAdminSettings() {
@@ -14540,7 +14545,7 @@ class HavenApp {
       'pin_message', 'archive_messages', 'kick_user', 'mute_user', 'ban_user',
       'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
       'create_channel', 'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-      'manage_emojis', 'promote_user', 'transfer_admin'
+      'manage_emojis', 'manage_soundboard', 'promote_user', 'transfer_admin'
     ];
     const permLabels = {
       edit_own_messages: 'Edit Own Messages', delete_own_messages: 'Delete Own Messages',
@@ -14554,6 +14559,7 @@ class HavenApp {
       manage_webhooks: 'Manage Webhooks', mention_everyone: 'Mention @everyone',
       view_history: 'View Message History',
       manage_emojis: 'Manage Custom Emojis',
+      manage_soundboard: 'Manage Soundboard',
       promote_user: 'Promote Users', transfer_admin: 'Transfer Admin'
     };
     const rolePerms = role.permissions || [];
@@ -14953,7 +14959,7 @@ class HavenApp {
       'pin_message', 'archive_messages', 'kick_user', 'mute_user', 'ban_user',
       'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
       'create_channel', 'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-      'manage_emojis', 'promote_user', 'transfer_admin'
+      'manage_emojis', 'manage_soundboard', 'promote_user', 'transfer_admin'
     ];
     const permLabels = {
       edit_own_messages: 'Edit Own Messages', delete_own_messages: 'Delete Own Messages',
@@ -14967,6 +14973,7 @@ class HavenApp {
       manage_webhooks: 'Manage Webhooks', mention_everyone: 'Mention @everyone',
       view_history: 'View Message History',
       manage_emojis: 'Manage Custom Emojis',
+      manage_soundboard: 'Manage Soundboard',
       promote_user: 'Promote Users', transfer_admin: 'Transfer Admin'
     };
     const rolePerms = role.permissions || [];
@@ -15347,7 +15354,7 @@ class HavenApp {
       'pin_message', 'archive_messages', 'kick_user', 'mute_user', 'ban_user',
       'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
       'create_channel', 'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-      'manage_emojis', 'promote_user', 'transfer_admin'
+      'manage_emojis', 'manage_soundboard', 'promote_user', 'transfer_admin'
     ];
     // Perms that only admin can grant
     const adminOnlyPerms = ['transfer_admin'];
@@ -15364,6 +15371,7 @@ class HavenApp {
       use_voice: 'Use Voice', manage_webhooks: 'Manage Webhooks',
       mention_everyone: 'Mention Everyone', view_history: 'View History',
       manage_emojis: 'Manage Custom Emojis',
+      manage_soundboard: 'Manage Soundboard',
       promote_user: 'Promote Users', transfer_admin: 'Transfer Admin'
     };
 

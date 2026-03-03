@@ -847,7 +847,7 @@ app.post('/api/upload-sound', uploadLimiter, (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   const user = token ? verifyToken(token) : null;
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  if (!verifyAdminFromDb(user)) return res.status(403).json({ error: 'Admin only' });
+  if (!verifyAdminFromDb(user) && !userHasPermission(user.id, 'manage_soundboard')) return res.status(403).json({ error: 'Requires admin or Manage Soundboard permission' });
 
   soundUpload.single('sound')(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
@@ -882,7 +882,7 @@ app.delete('/api/sounds/:name', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   const user = token ? verifyToken(token) : null;
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  if (!verifyAdminFromDb(user)) return res.status(403).json({ error: 'Admin only' });
+  if (!verifyAdminFromDb(user) && !userHasPermission(user.id, 'manage_soundboard')) return res.status(403).json({ error: 'Requires admin or Manage Soundboard permission' });
   const name = req.params.name;
   const { getDb } = require('./src/database');
   try {
@@ -899,7 +899,7 @@ app.patch('/api/sounds/:name', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   const user = token ? verifyToken(token) : null;
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  if (!verifyAdminFromDb(user)) return res.status(403).json({ error: 'Admin only' });
+  if (!verifyAdminFromDb(user) && !userHasPermission(user.id, 'manage_soundboard')) return res.status(403).json({ error: 'Requires admin or Manage Soundboard permission' });
   const oldName = req.params.name;
   let newName = (req.body.newName || '').trim().replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s+/g, ' ').trim();
   if (!newName || newName.length > 30) return res.status(400).json({ error: 'Invalid new name' });
@@ -1184,8 +1184,10 @@ app.get('/api/link-preview', previewLimiter, async (req, res) => {
     const twitterMatch = url.match(/^https?:\/\/(?:(?:www\.|mobile\.)?(?:twitter|x)\.com|(?:fixupx|fxtwitter|vxtwitter)\.com)\/\w+\/status\/\d+/i);
     if (twitterMatch) {
       try {
+        // Normalize proxy URLs to twitter.com — the oEmbed endpoint only accepts native URLs
+        const twitterOembedUrl = url.replace(/^https?:\/\/(?:fixupx|fxtwitter|vxtwitter)\.com\//i, 'https://twitter.com/');
         const oembed = await fetch(
-          `https://publish.twitter.com/oembed?url=${encodeURIComponent(url)}&omit_script=true`,
+          `https://publish.twitter.com/oembed?url=${encodeURIComponent(twitterOembedUrl)}&omit_script=true`,
           { signal: AbortSignal.timeout(6000), headers: { 'User-Agent': PREVIEW_UA } }
         );
         if (oembed.ok) {
@@ -1198,6 +1200,26 @@ app.get('/api/link-preview', previewLimiter, async (req, res) => {
             image: null, // Twitter oEmbed doesn't return images, OG scrape below may add one
             siteName: oj.provider_name || 'X',
             url: oj.url || url
+          };
+        }
+      } catch { /* fall through to generic scrape */ }
+    }
+
+    // ── Pixiv — blocks bots for HTML but provides an oEmbed API ────────
+    if (!data && /^https?:\/\/(?:www\.)?pixiv\.net\/(?:en\/)?artworks\/\d+/i.test(url)) {
+      try {
+        const poEmbed = await fetch(
+          `https://embed.pixiv.net/oembed.php?url=${encodeURIComponent(url)}&format=json`,
+          { signal: AbortSignal.timeout(6000), headers: { 'User-Agent': PREVIEW_UA } }
+        );
+        if (poEmbed.ok) {
+          const oj = await poEmbed.json();
+          data = {
+            title: oj.title || null,
+            description: oj.author_name ? `by ${oj.author_name}` : null,
+            image: oj.thumbnail_url || null,
+            siteName: 'pixiv',
+            url
           };
         }
       } catch { /* fall through to generic scrape */ }
@@ -1266,6 +1288,33 @@ app.get('/api/link-preview', previewLimiter, async (req, res) => {
         siteName: getMetaContent('og:site_name') || parsed.hostname,
         url: getMetaContent('og:url') || url
       };
+
+      // oEmbed autodiscovery — if OG tags came back empty and the page advertises a
+      // JSON oEmbed endpoint, use it. This future-proofs support for any oEmbed-compatible
+      // site without needing a dedicated handler.
+      if (!data.title && !data.image) {
+        const oembedHref =
+          chunk.match(/<link[^>]*?type=["']application\/json\+oembed["'][^>]*?href=["']([^"']+)["']/i) ||
+          chunk.match(/<link[^>]*?href=["']([^"']+)["'][^>]*?type=["']application\/json\+oembed["']/i);
+        if (oembedHref) {
+          try {
+            const oembedEndpoint = new URL(oembedHref[1], currentUrl).href;
+            await validateUrlSafe(oembedEndpoint);
+            const oResp = await fetch(oembedEndpoint, {
+              signal: AbortSignal.timeout(5000),
+              headers: { 'User-Agent': PREVIEW_UA }
+            });
+            if (oResp.ok) {
+              const oj = await oResp.json();
+              data.title = data.title || oj.title || null;
+              data.image = data.image || oj.thumbnail_url || null;
+              if (!data.siteName || data.siteName === parsed.hostname) {
+                data.siteName = oj.provider_name || data.siteName;
+              }
+            }
+          } catch { /* autodiscovery failed — keep OG data as-is */ }
+        }
+      }
     } else {
       // Twitter oEmbed succeeded — try a quick scrape for the image only
       try {

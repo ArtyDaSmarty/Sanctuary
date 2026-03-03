@@ -3200,7 +3200,7 @@ function setupSocketHandlers(io, db) {
             'pin_message', 'kick_user', 'mute_user', 'ban_user',
             'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
             'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-            'promote_user', 'transfer_admin', 'archive_messages', 'create_channel', 'manage_emojis'
+            'promote_user', 'transfer_admin', 'archive_messages', 'create_channel', 'manage_emojis', 'manage_soundboard'
           ];
           for (const [k, v] of Object.entries(obj)) {
             if (!validPerms.includes(k)) return;
@@ -4599,7 +4599,7 @@ function setupSocketHandlers(io, db) {
           'delete_lower_messages', 'edit_own_messages', 'pin_message', 'set_channel_topic',
           'manage_sub_channels', 'rename_channel', 'rename_sub_channel',
           'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-          'promote_user', 'transfer_admin', 'archive_messages', 'create_channel', 'manage_emojis'
+          'promote_user', 'transfer_admin', 'archive_messages', 'create_channel', 'manage_emojis', 'manage_soundboard'
         ];
         const insertPerm = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, permission, allowed) VALUES (?, ?, 1)');
         perms.forEach(p => { if (validPerms.includes(p)) insertPerm.run(result.lastInsertRowid, p); });
@@ -4656,7 +4656,7 @@ function setupSocketHandlers(io, db) {
             'delete_lower_messages', 'edit_own_messages', 'pin_message', 'set_channel_topic',
             'manage_sub_channels', 'rename_channel', 'rename_sub_channel',
             'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-            'promote_user', 'transfer_admin', 'archive_messages', 'create_channel', 'manage_emojis'
+            'promote_user', 'transfer_admin', 'archive_messages', 'create_channel', 'manage_emojis', 'manage_soundboard'
           ];
           db.prepare('DELETE FROM role_permissions WHERE role_id = ?').run(roleId);
           const insertPerm = db.prepare('INSERT INTO role_permissions (role_id, permission, allowed) VALUES (?, ?, 1)');
@@ -5199,7 +5199,7 @@ function setupSocketHandlers(io, db) {
               'delete_lower_messages', 'edit_own_messages', 'pin_message', 'set_channel_topic',
               'manage_sub_channels', 'rename_channel', 'rename_sub_channel',
               'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-              'manage_emojis', 'promote_user', 'transfer_admin'
+              'manage_emojis', 'manage_soundboard', 'promote_user', 'transfer_admin'
             ];
             const insertPerm = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, permission, allowed) VALUES (?, ?, 1)');
             allPerms.forEach(p => insertPerm.run(formerAdminRole.id, p));
