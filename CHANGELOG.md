@@ -11,6 +11,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Haven uses [Sema
 
 ---
 
+## [2.5.5] — 2026-03-03
+
+### Fixed
+- **Settings layout broken after v2.5.4** — the commit that added Desktop Shortcuts dropped the opening `<div>` for the Layout Density section, causing every settings section below it to render as a horizontal row instead of a scrollable vertical list.
+- **TOTP copy button silent failure in Desktop app** — `navigator.clipboard.writeText()` fails silently in Electron. Both the setup secret and backup codes copy buttons now fall back to `execCommand('copy')` when the Clipboard API is unavailable.
+- **Settings modal closed by accidental backdrop click during TOTP setup** — clicking outside the modal while the TOTP setup form or backup codes view was visible would close the modal and lose setup progress. Backdrop clicks are now ignored while the TOTP flow is active.
+- **Active sessions not invalidated when enabling 2FA** — enabling TOTP now bumps `password_version` and force-disconnects all other active sessions, matching the behavior of password changes. The activating session receives a fresh token and stays logged in.
+
+---
+
 ## [2.5.4] — 2026-03-03
 
 ### Fixed
