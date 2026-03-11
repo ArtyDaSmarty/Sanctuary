@@ -9513,6 +9513,16 @@ html.rgb-cycling *::after {
   max-height: 45vh;
   background: #000;
 }
+/* When a stream/webcam video is fullscreened, override tile constraints */
+video:fullscreen,
+video:-webkit-full-screen {
+  max-height: unset !important;
+  max-width: unset !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  object-fit: contain !important;
+  background: #000;
+}
 
 .screen-share-tile-label {
   position: absolute;
@@ -10846,38 +10856,7 @@ ul.chat-list { list-style-type: disc; }
   max-width: 100%;
 }
 
-/* Override size restrictions when the video goes fullscreen */
-.file-video:fullscreen,
-.file-video:-webkit-full-screen {
-  max-height: unset;
-  max-width: unset;
-  width: 100vw;
-  height: 100vh;
-  object-fit: contain;
-  background: #000;
-}
 
-.file-video-fs-btn {
-  position: absolute;
-  bottom: 8px;
-  right: 8px;
-  background: rgba(0,0,0,0.55);
-  color: #fff;
-  border: none;
-  border-radius: 4px;
-  padding: 2px 6px;
-  font-size: 1rem;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s;
-  pointer-events: none;
-  z-index: 2;
-}
-
-.file-video-wrap:hover .file-video-fs-btn {
-  opacity: 1;
-  pointer-events: auto;
-}
 
 /* Risky file highlight */
 .file-download-link.risky-file .file-name {

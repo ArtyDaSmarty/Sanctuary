@@ -582,27 +582,13 @@ _setupVideos(containerEl) {
     if (video.dataset.havenSetup) return;
     video.dataset.havenSetup = '1';
 
-    // Inject a fullscreen button so Electron (where native controls' fullscreen
-    // button may be non-functional) has a reliable way to go fullscreen.
-    const wrap = video.closest('.file-video-wrap');
-    if (wrap) {
-      const fsBtn = document.createElement('button');
-      fsBtn.className = 'file-video-fs-btn';
-      fsBtn.title = 'Fullscreen';
-      fsBtn.innerHTML = '⛶';
-      fsBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const fn = video.requestFullscreen || video.webkitRequestFullscreen;
-        if (fn) fn.call(video);
-      });
-      wrap.appendChild(fsBtn);
-    }
-
     // PiP: wire up MediaSession so the PiP window shows a seek bar
     const updatePos = () => {
       try {
         if (!isNaN(video.duration) && video.duration > 0) {
-          navigator.mediaSession?.setPositionState({
+          navigator.mediaSession.metadata = navigator.mediaSession.metadata
+            || new MediaMetadata({ title: 'Haven Video' });
+          navigator.mediaSession.setPositionState({
             duration: video.duration,
             position: Math.min(video.currentTime, video.duration),
             playbackRate: video.playbackRate || 1,
@@ -612,26 +598,35 @@ _setupVideos(containerEl) {
     };
     video.addEventListener('enterpictureinpicture', () => {
       try {
-        navigator.mediaSession?.setActionHandler('seekto', (d) => {
+        navigator.mediaSession.playbackState = 'playing';
+        navigator.mediaSession.metadata = new MediaMetadata({ title: 'Haven Video' });
+        navigator.mediaSession.setActionHandler('seekto', (d) => {
           if (d.seekTime !== undefined) { video.currentTime = d.seekTime; updatePos(); }
         });
-        navigator.mediaSession?.setActionHandler('seekbackward', (d) => {
+        navigator.mediaSession.setActionHandler('seekbackward', (d) => {
           video.currentTime = Math.max(0, video.currentTime - (d.seekOffset || 10)); updatePos();
         });
-        navigator.mediaSession?.setActionHandler('seekforward', (d) => {
+        navigator.mediaSession.setActionHandler('seekforward', (d) => {
           video.currentTime = Math.min(video.duration, video.currentTime + (d.seekOffset || 10)); updatePos();
         });
+        navigator.mediaSession.setActionHandler('play', () => { video.play(); });
+        navigator.mediaSession.setActionHandler('pause', () => { video.pause(); });
         video.addEventListener('timeupdate', updatePos);
+        video.addEventListener('playing', updatePos);
         updatePos();
       } catch {}
     });
     video.addEventListener('leavepictureinpicture', () => {
       try {
-        navigator.mediaSession?.setActionHandler('seekto', null);
-        navigator.mediaSession?.setActionHandler('seekbackward', null);
-        navigator.mediaSession?.setActionHandler('seekforward', null);
+        navigator.mediaSession.setActionHandler('seekto', null);
+        navigator.mediaSession.setActionHandler('seekbackward', null);
+        navigator.mediaSession.setActionHandler('seekforward', null);
+        navigator.mediaSession.setActionHandler('play', null);
+        navigator.mediaSession.setActionHandler('pause', null);
+        navigator.mediaSession.metadata = null;
       } catch {}
       video.removeEventListener('timeupdate', updatePos);
+      video.removeEventListener('playing', updatePos);
     });
   });
 },
