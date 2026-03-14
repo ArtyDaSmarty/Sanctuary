@@ -349,7 +349,10 @@ _setupSocketListeners() {
       if (this._suppressCoupleCheck) return;
       const st = msgContainer.scrollTop;
       const dist = msgContainer.scrollHeight - msgContainer.clientHeight - st;
-      if (dist < 200) {
+      if (dist < 200 && this._noMoreFuture !== false) {
+        // Only couple if the DOM contains the actual latest messages.
+        // When newer messages have been trimmed, the scroll "bottom" is
+        // artificial and re-coupling would yank the user forward.
         this._coupledToBottom = true;
       } else if (st < lastScrollTop) {
         // User scrolled up — decouple immediately

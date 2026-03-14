@@ -188,21 +188,7 @@ _prependMessages(messages) {
   // 4. Insert at top
   container.insertBefore(fragment, container.firstChild);
 
-  // 5. Trim newest messages from the bottom (below viewport — can't move visible content)
-  const MAX_DOM_MESSAGES = 100;
-  const excess = container.children.length - MAX_DOM_MESSAGES;
-  if (excess > 0) {
-    for (let i = 0; i < excess; i++) {
-      container.removeChild(container.lastElementChild);
-    }
-    this._noMoreFuture = false;
-    const last = container.lastElementChild;
-    if (last && last.dataset && last.dataset.msgId) {
-      this._newestMsgId = parseInt(last.dataset.msgId);
-    }
-  }
-
-  // 6. Restore anchor — pin the same message at the same viewport offset
+  // 5. Realign anchor immediately after insert
   const realign = () => {
     if (!anchorEl) return;
     const cr = container.getBoundingClientRect();
@@ -212,10 +198,60 @@ _prependMessages(messages) {
   };
   realign();
 
+  // 6. Trim from both ends to CENTER the anchor within the DOM window.
+  //    This puts the scrollbar near the middle of the track, giving the user
+  //    freedom to scroll in either direction after a load/trim cycle.
+  const MAX_DOM_MESSAGES = 100;
+  const total = container.children.length;
+  if (total > MAX_DOM_MESSAGES && anchorEl) {
+    const anchorIdx = Array.from(container.children).indexOf(anchorEl);
+    const half = Math.floor(MAX_DOM_MESSAGES / 2);
+    let keepStart = Math.max(0, anchorIdx - half);
+    let keepEnd = keepStart + MAX_DOM_MESSAGES;
+    if (keepEnd > total) {
+      keepEnd = total;
+      keepStart = Math.max(0, total - MAX_DOM_MESSAGES);
+    }
+
+    // Trim from bottom first (below viewport — no visual shift)
+    const trimBottom = total - keepEnd;
+    if (trimBottom > 0) {
+      for (let i = 0; i < trimBottom; i++) container.removeChild(container.lastElementChild);
+      this._noMoreFuture = false;
+      const last = container.lastElementChild;
+      if (last && last.dataset && last.dataset.msgId) {
+        this._newestMsgId = parseInt(last.dataset.msgId);
+      }
+    }
+
+    // Trim from top (above viewport — adjust scrollTop to compensate)
+    if (keepStart > 0) {
+      const hBefore = container.scrollHeight;
+      for (let i = 0; i < keepStart; i++) container.removeChild(container.firstElementChild);
+      container.scrollTop -= (hBefore - container.scrollHeight);
+      this._noMoreHistory = false;
+      const first = container.firstElementChild;
+      if (first && first.dataset && first.dataset.msgId) {
+        this._oldestMsgId = parseInt(first.dataset.msgId);
+      }
+    }
+
+    realign();
+  } else if (total > MAX_DOM_MESSAGES) {
+    // No anchor — just trim from bottom
+    const excess = total - MAX_DOM_MESSAGES;
+    for (let i = 0; i < excess; i++) container.removeChild(container.lastElementChild);
+    this._noMoreFuture = false;
+    const last = container.lastElementChild;
+    if (last && last.dataset && last.dataset.msgId) {
+      this._newestMsgId = parseInt(last.dataset.msgId);
+    }
+  }
+
   // 7. Keep anchor stable while async content (images, embeds, link previews)
-  //    loads in the prepended area above the viewport.  Each load shifts the
-  //    anchor down; we immediately correct scrollTop so the user sees nothing move.
+  //    loads in the prepended area above the viewport.
   for (const el of addedEls) {
+    if (!container.contains(el)) continue;
     el.querySelectorAll('img').forEach(img => {
       if (!img.complete) {
         img.addEventListener('load', () => { if (!this._coupledToBottom) realign(); }, { once: true });
@@ -224,20 +260,21 @@ _prependMessages(messages) {
     });
   }
 
-  // Also watch for DOM changes in prepended messages (link previews, YouTube
+  // Watch for DOM changes in prepended messages (link previews, YouTube
   // embeds, E2E image decryption) that add height above the anchor.
   const mo = new MutationObserver(() => { if (!this._coupledToBottom) realign(); });
   for (const el of addedEls) {
+    if (!container.contains(el)) continue;
     mo.observe(el, { childList: true, subtree: true });
   }
-  // Stop observing after 15s — all async content should be settled by then
   setTimeout(() => mo.disconnect(), 15000);
 
   // 8. Unfreeze on next frame
   requestAnimationFrame(() => { this._suppressCoupleCheck = false; });
 
-  // Process only newly-prepended messages
+  // Process only newly-prepended messages still in DOM
   for (const el of addedEls) {
+    if (!container.contains(el)) continue;
     this._fetchLinkPreviews(el);
     this._setupVideos(el);
     this._decryptE2EImages(el);
