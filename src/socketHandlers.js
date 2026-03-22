@@ -194,8 +194,78 @@ async function searchYouTube(query, count = 5, offset = 0) {
     return [];
   }
 }
-//Pull a max of 200 tracks from a playlist provided by a user. Potentially should have maxTracks be a server configurable setting
-//instead of hardcoded.
+function getYouTubeClientContext() {
+  return {
+    client: { clientName: 'WEB', clientVersion: '2.20241120.01.00', hl: 'en', gl: 'US' } //Matching client version already present, but this is quite old.
+  };
+}
+
+function parseYouTubePlaylistPage(data) {
+  const listRenderer = data?.contents?.twoColumnBrowseResultsRenderer?.tabs?.[0]
+    ?.tabRenderer?.content?.sectionListRenderer?.contents?.[0]
+    ?.itemSectionRenderer?.contents?.[0]?.playlistVideoListRenderer;
+  const items = Array.isArray(listRenderer?.contents) ? listRenderer.contents : [];
+  const continuation = listRenderer?.continuations?.[0]?.nextContinuationData?.continuation || null;
+  return { items, continuation };
+}
+
+function getContinuationItemsFromAppendAction(data) {
+  const appendAction = data?.onResponseReceivedActions?.find(action => action?.appendContinuationItemsAction)
+    ?.appendContinuationItemsAction;
+  if (Array.isArray(appendAction?.continuationItems)) return appendAction.continuationItems;
+
+  const appendEndpoint = data?.onResponseReceivedEndpoints?.find(endpoint => endpoint?.appendContinuationItemsAction)
+    ?.appendContinuationItemsAction;
+  if (Array.isArray(appendEndpoint?.continuationItems)) return appendEndpoint.continuationItems;
+
+  return [];
+}
+
+function getContinuationTokenFromItems(items) {
+  if (!Array.isArray(items)) return null;
+  const continuationItem = items.find(item => item?.continuationItemRenderer);
+  return continuationItem?.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token || null;
+}
+
+function getContinuationItemsFromPlaylistContents(data) {
+  return data?.continuationContents?.playlistVideoListContinuation?.contents || [];
+}
+
+function getContinuationTokenFromPlaylistContents(data) {
+  return data?.continuationContents?.playlistVideoListContinuation?.continuations?.[0]
+    ?.nextContinuationData?.continuation || null;
+}
+
+function parseYouTubePlaylistContinuation(data) {
+  // InnerTube playlist continuations are not stable. Depending on client/experiment bucket, YouTube may return appended rows under response "actions", "endpoints",
+  //or direct "continuationContents", so we check for all of them.
+  const appendItems = getContinuationItemsFromAppendAction(data);
+  if (appendItems.length > 0) {
+    return {
+      items: appendItems,
+      continuation: getContinuationTokenFromItems(appendItems)
+    };
+  }
+
+  const playlistItems = getContinuationItemsFromPlaylistContents(data);
+  return {
+    items: playlistItems,
+    continuation: getContinuationTokenFromPlaylistContents(data)
+  };
+}
+
+function appendYouTubePlaylistTracks(tracks, items, maxTracks) {
+  if (!Array.isArray(items)) return;
+  for (const item of items) {
+    const v = item?.playlistVideoRenderer;
+    if (!v?.videoId) continue;
+    tracks.push({ videoId: v.videoId, title: v.title?.runs?.[0]?.text || '' });
+    if (tracks.length >= maxTracks) break;
+  }
+}
+
+// Pull a max of 200 tracks from a playlist provided by a user. Potentially should
+// have maxTracks be a server configurable setting instead of hardcoded.
 async function fetchYouTubePlaylist(playlistId, maxTracks = 200) {
   try {
     const resp = await fetch('https://www.youtube.com/youtubei/v1/browse?prettyPrint=false', {
@@ -203,21 +273,31 @@ async function fetchYouTubePlaylist(playlistId, maxTracks = 200) {
       headers: { 'Content-Type': 'application/json', 'User-Agent': YT_UA },
       body: JSON.stringify({
         browseId: 'VL' + playlistId,
-        context: { client: { clientName: 'WEB', clientVersion: '2.20241120.01.00', hl: 'en', gl: 'US' } } //Matching client version already present, but this is quite old.
+        context: getYouTubeClientContext()
       })
     });
     if (!resp.ok) return [];
     const data = await resp.json();
-    const items = data?.contents?.twoColumnBrowseResultsRenderer?.tabs?.[0]
-      ?.tabRenderer?.content?.sectionListRenderer?.contents?.[0]
-      ?.itemSectionRenderer?.contents?.[0]?.playlistVideoListRenderer?.contents;
-    if (!Array.isArray(items)) return [];
     const tracks = [];
-    for (const item of items) {
-      const v = item.playlistVideoRenderer;
-      if (!v?.videoId) continue;
-      tracks.push({ videoId: v.videoId, title: v.title?.runs?.[0]?.text || '' });
-      if (tracks.length >= maxTracks) break;
+    const firstPage = parseYouTubePlaylistPage(data);
+    appendYouTubePlaylistTracks(tracks, firstPage.items, maxTracks);
+    let continuation = firstPage.continuation;
+
+    while (continuation && tracks.length < maxTracks) {
+      const pageResp = await fetch('https://www.youtube.com/youtubei/v1/browse?prettyPrint=false', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': YT_UA },
+        body: JSON.stringify({
+          continuation,
+          context: getYouTubeClientContext()
+        })
+      });
+      if (!pageResp.ok) break;
+      const pageData = await pageResp.json();
+      const nextPage = parseYouTubePlaylistContinuation(pageData);
+      appendYouTubePlaylistTracks(tracks, nextPage.items, maxTracks);
+      if (!nextPage.continuation || nextPage.continuation === continuation) break;
+      continuation = nextPage.continuation;
     }
     return tracks;
   } catch { return []; }
@@ -5640,11 +5720,11 @@ function setupSocketHandlers(io, db) {
         const insertPerm = db.prepare('INSERT INTO role_permissions (role_id, permission, allowed) VALUES (?, ?, 1)');
 
         const serverMod = insertRole.run('Server Mod', 50, 'server', '#3498db');
-        ['kick_user','mute_user','delete_message','pin_message','set_channel_topic','manage_sub_channels','rename_channel','rename_sub_channel','delete_lower_messages','manage_webhooks','upload_files','use_voice','view_history','view_all_members','delete_own_messages','edit_own_messages']
+        ['kick_user','mute_user','delete_message','pin_message','set_channel_topic','manage_sub_channels','rename_channel','rename_sub_channel','delete_lower_messages','manage_webhooks','upload_files','use_voice','view_history','view_all_members','manage_music_queue','delete_own_messages','edit_own_messages']
           .forEach(p => insertPerm.run(serverMod.lastInsertRowid, p));
 
         const channelMod = insertRole.run('Channel Mod', 25, 'channel', '#2ecc71');
-        ['kick_user','mute_user','delete_message','pin_message','manage_sub_channels','rename_sub_channel','delete_lower_messages','upload_files','use_voice','view_history','delete_own_messages','edit_own_messages']
+        ['kick_user','mute_user','delete_message','pin_message','manage_sub_channels','rename_sub_channel','delete_lower_messages','upload_files','use_voice','view_history','manage_music_queue','delete_own_messages','edit_own_messages']
           .forEach(p => insertPerm.run(channelMod.lastInsertRowid, p));
 
         const userRole = insertRole.run('User', 1, 'server', '#95a5a6');
