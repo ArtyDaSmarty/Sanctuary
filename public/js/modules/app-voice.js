@@ -971,6 +971,7 @@ _handleScreenStream(userId, stream, { force = false } = {}) {
 async _populateAudioDevices() {
   const inputSelect  = document.getElementById('voice-input-device');
   const outputSelect = document.getElementById('voice-output-device');
+  const camSelect    = document.getElementById('voice-cam-device');
   if (!inputSelect || !outputSelect) return;
 
   let devices = [];
@@ -994,9 +995,11 @@ async _populateAudioDevices() {
 
   const inputs  = devices.filter(d => d.kind === 'audioinput');
   const outputs = devices.filter(d => d.kind === 'audiooutput');
+  const cameras = devices.filter(d => d.kind === 'videoinput');
 
   const savedInput  = localStorage.getItem('haven_input_device') || '';
   const savedOutput = localStorage.getItem('haven_output_device') || '';
+  const savedCam    = localStorage.getItem('haven_cam_device') || '';
 
   // Populate input
   inputSelect.innerHTML = '<option value="">Default Microphone</option>';
@@ -1018,6 +1021,19 @@ async _populateAudioDevices() {
     opt.textContent = label;
     if (savedOutput === dev.deviceId) opt.selected = true;
     outputSelect.appendChild(opt);
+  }
+
+  // Populate camera
+  if (camSelect) {
+    camSelect.innerHTML = '<option value="">Default Camera</option>';
+    for (const dev of cameras) {
+      const label = dev.label || `Camera ${cameras.indexOf(dev) + 1}`;
+      const opt = document.createElement('option');
+      opt.value = dev.deviceId;
+      opt.textContent = label;
+      if (savedCam === dev.deviceId) opt.selected = true;
+      camSelect.appendChild(opt);
+    }
   }
 },
 

@@ -827,9 +827,10 @@ _setupUI() {
     }
   });
 
-  // ── Audio device dropdowns (input & output) ──
+  // ── Audio device dropdowns (input & output & camera) ──
   const inputDeviceSelect  = document.getElementById('voice-input-device');
   const outputDeviceSelect = document.getElementById('voice-output-device');
+  const camDeviceSelect    = document.getElementById('voice-cam-device');
   if (inputDeviceSelect) {
     inputDeviceSelect.addEventListener('change', (e) => {
       const deviceId = e.target.value;
@@ -847,6 +848,16 @@ _setupUI() {
       // Hot-swap output
       if (this.voice) {
         this.voice.switchOutputDevice(deviceId);
+      }
+    });
+  }
+  if (camDeviceSelect) {
+    camDeviceSelect.addEventListener('change', (e) => {
+      const deviceId = e.target.value;
+      localStorage.setItem('haven_cam_device', deviceId);
+      // Hot-swap camera if webcam is active
+      if (this.voice && this.voice.isWebcamActive) {
+        this.voice.switchCamera(deviceId);
       }
     });
   }

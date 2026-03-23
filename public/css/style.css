@@ -8470,6 +8470,7 @@ html.rgb-cycling *::after {
 
   /* Status bar — hidden on mobile to save vertical space */
   .status-bar { display: none; }
+  [data-desktop-app] .status-bar { display: flex; }
 }
 
 
@@ -8661,6 +8662,7 @@ html.rgb-cycling *::after {
 
   /* Status bar — hidden on phones */
   .status-bar { display: none; }
+  [data-desktop-app] .status-bar { display: flex; }
 
   /* Welcome screen */
   .welcome-icon { font-size: 48px; }
