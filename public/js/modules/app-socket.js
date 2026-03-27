@@ -6,6 +6,7 @@ _setupSocketListeners() {
   this.socket.on('forum-overview', (data) => {
     if (!data || data.code !== this._forumView?.parentCode) return;
     this._forumView.posts = data.posts || [];
+    this._forumView.canCreate = !!data.canCreate;
     this._renderForumBrowser();
   });
 
