@@ -418,7 +418,7 @@ function initDatabase() {
     const serverModPerms = [
       'kick_user', 'mute_user', 'delete_message', 'pin_message',
       'set_channel_topic', 'manage_sub_channels', 'rename_channel',
-      'rename_sub_channel', 'delete_lower_messages', 'manage_webhooks',
+      'rename_sub_channel', 'create_forum_posts', 'delete_lower_messages', 'manage_webhooks',
       'upload_files', 'use_voice', 'view_history', 'view_all_members',
       'delete_own_messages', 'edit_own_messages'
     ];
@@ -428,7 +428,7 @@ function initDatabase() {
     const channelMod = insertRole.run('Channel Mod', 25, 'channel', '#2ecc71');
     const channelModPerms = [
       'kick_user', 'mute_user', 'delete_message', 'pin_message',
-      'manage_sub_channels', 'rename_sub_channel', 'delete_lower_messages',
+      'manage_sub_channels', 'rename_sub_channel', 'create_forum_posts', 'delete_lower_messages',
       'upload_files', 'use_voice', 'view_history',
       'delete_own_messages', 'edit_own_messages'
     ];
@@ -439,7 +439,7 @@ function initDatabase() {
     db.prepare('UPDATE roles SET auto_assign = 1 WHERE id = ?').run(userRole.lastInsertRowid);
     const userPerms = [
       'delete_own_messages', 'edit_own_messages', 'upload_files',
-      'use_voice', 'view_history'
+      'use_voice', 'view_history', 'create_forum_posts'
     ];
     userPerms.forEach(p => insertPerm.run(userRole.lastInsertRowid, p));
   }
@@ -604,6 +604,14 @@ function initDatabase() {
         thresholds.create_channel = 50;
         db.prepare("UPDATE server_settings SET value = ? WHERE key = 'permission_thresholds'").run(JSON.stringify(thresholds));
       }
+    }
+  } catch { /* ignore */ }
+
+  // ── Migration: ensure default User role can create forum posts ──
+  try {
+    const userRole = db.prepare("SELECT id FROM roles WHERE name = 'User' AND level = 1 AND scope = 'server'").get();
+    if (userRole) {
+      db.prepare("INSERT OR IGNORE INTO role_permissions (role_id, permission, allowed) VALUES (?, 'create_forum_posts', 1)").run(userRole.id);
     }
   } catch { /* ignore */ }
 
