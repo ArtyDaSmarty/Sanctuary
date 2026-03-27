@@ -63,6 +63,12 @@ class HavenApp {
       activeTag: '',
       canCreate: false
     };
+    this._proxySettings = {
+      list: [],
+      editingId: null,
+      draftAvatarUrl: '',
+      loaded: false
+    };
     this._nicknames = JSON.parse(localStorage.getItem('haven_nicknames') || '{}'); // client-side nicknames { oderId: name }
 
     // Slash command definitions for autocomplete
