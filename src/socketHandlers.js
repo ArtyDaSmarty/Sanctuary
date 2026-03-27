@@ -5999,7 +5999,7 @@ function setupSocketHandlers(io, db) {
         || userHasPermission(socket.user.id, 'create_channel', parent.id);
 
       const posts = db.prepare(`
-        SELECT c.id, c.code, c.name, c.category, c.is_private, c.created_at,
+        SELECT c.id, c.code, c.name, c.category, c.is_private, c.created_at, c.created_by,
                COALESCE(u.display_name, u.username, 'Unknown') as author
         FROM channels c
         LEFT JOIN users u ON c.created_by = u.id
@@ -6020,6 +6020,11 @@ function setupSocketHandlers(io, db) {
         const latestId = db.prepare('SELECT MAX(id) as latest_id FROM messages WHERE channel_id = ?').get(post.id)?.latest_id || 0;
         const messageCount = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE channel_id = ?').get(post.id)?.cnt || 0;
         const lastRead = db.prepare('SELECT last_read_message_id FROM read_positions WHERE user_id = ? AND channel_id = ?').get(socket.user.id, post.id)?.last_read_message_id || 0;
+        const canDelete = socket.user.isAdmin
+          || (socket.user.effectiveLevel || 0) >= 25
+          || post.created_by === socket.user.id
+          || userHasPermission(socket.user.id, 'manage_sub_channels', parent.id)
+          || userHasPermission(socket.user.id, 'delete_message', post.id);
         return {
           id: post.id,
           code: post.code,
@@ -6030,6 +6035,7 @@ function setupSocketHandlers(io, db) {
           author: post.author,
           preview: sanitizeText(originalPost?.content || '').slice(0, 180),
           messageCount,
+          canDelete,
           unreadCount: latestId > lastRead
             ? (db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE channel_id = ? AND id > ? AND user_id != ?').get(post.id, lastRead, socket.user.id)?.cnt || 0)
             : 0
@@ -6137,6 +6143,46 @@ function setupSocketHandlers(io, db) {
       } catch (err) {
         console.error('Create forum post error:', err);
         cb?.({ error: 'Failed to create forum post' });
+      }
+    });
+
+    socket.on('delete-forum-post', (data, cb) => {
+      if (!data || typeof data !== 'object') return cb?.({ error: 'Invalid request' });
+      const code = typeof data.code === 'string' ? data.code.trim() : '';
+      if (!code || !/^[a-f0-9]{8}$/i.test(code)) return cb?.({ error: 'Invalid forum post' });
+
+      const post = db.prepare('SELECT * FROM channels WHERE code = ? AND is_dm = 0').get(code);
+      if (!post || !post.parent_channel_id) return cb?.({ error: 'Forum post not found' });
+
+      const parent = db.prepare('SELECT * FROM channels WHERE id = ?').get(post.parent_channel_id);
+      if (!parent || parent.channel_type !== 'forum') return cb?.({ error: 'Forum post not found' });
+
+      const canDelete = socket.user.isAdmin
+        || (socket.user.effectiveLevel || 0) >= 25
+        || post.created_by === socket.user.id
+        || userHasPermission(socket.user.id, 'manage_sub_channels', parent.id)
+        || userHasPermission(socket.user.id, 'delete_message', post.id);
+      if (!canDelete) return cb?.({ error: 'You do not have permission to delete this forum post' });
+
+      try {
+        const deleteAll = db.transaction((chId) => {
+          db.prepare('DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE channel_id = ?)').run(chId);
+          db.prepare('DELETE FROM pinned_messages WHERE channel_id = ?').run(chId);
+          db.prepare('DELETE FROM messages WHERE channel_id = ?').run(chId);
+          db.prepare('DELETE FROM channel_members WHERE channel_id = ?').run(chId);
+          db.prepare('DELETE FROM channels WHERE id = ?').run(chId);
+        });
+        deleteAll(post.id);
+
+        io.to(`channel:${code}`).emit('channel-deleted', { code });
+        io.to(`channel:${parent.code}`).emit('forum-post-deleted', { parentCode: parent.code, code });
+        channelUsers.delete(code);
+        voiceUsers.delete(code);
+        broadcastChannelLists();
+        cb?.({ ok: true, parentCode: parent.code, code });
+      } catch (err) {
+        console.error('Delete forum post error:', err);
+        cb?.({ error: 'Failed to delete forum post' });
       }
     });
 
