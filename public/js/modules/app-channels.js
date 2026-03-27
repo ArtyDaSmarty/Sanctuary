@@ -153,6 +153,7 @@ _isForumPostChannel(channel) {
 
 _showForumBrowser(channel) {
   this._forumView.parentCode = channel.code;
+  this._forumView.canCreate = false;
   document.getElementById('forum-browser-title').textContent = `# ${channel.name}`;
   const descEl = document.getElementById('forum-browser-description');
   if (descEl) {
@@ -162,9 +163,13 @@ _showForumBrowser(channel) {
     descEl.onclick = canEdit ? () => this._editTopic() : null;
     descEl.title = canEdit ? 'Click to edit topic' : (channel.topic || '');
   }
-  const canPost = this.user.isAdmin || this._hasPerm('create_forum_posts') || this._hasPerm('manage_sub_channels') || this._hasPerm('create_channel');
   const createBtn = document.getElementById('forum-create-post-btn');
-  if (createBtn) createBtn.style.display = canPost ? 'inline-flex' : 'none';
+  if (createBtn) {
+    const canPost = this._forumView?.parentCode === channel.code
+      ? !!this._forumView?.canCreate
+      : false;
+    createBtn.style.display = canPost ? 'inline-flex' : 'none';
+  }
   this.socket.emit('get-forum-overview', { code: channel.code });
 },
 
@@ -173,6 +178,8 @@ _renderForumBrowser() {
   if (!parentCode) return;
   const currentParent = this.channels.find(c => c.code === parentCode);
   if (!currentParent || currentParent.channel_type !== 'forum') return;
+  const createBtn = document.getElementById('forum-create-post-btn');
+  if (createBtn) createBtn.style.display = this._forumView?.canCreate ? 'inline-flex' : 'none';
 
   const posts = Array.isArray(this._forumView.posts) ? this._forumView.posts : [];
   const search = (this._forumView.search || '').trim().toLowerCase();
