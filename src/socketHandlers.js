@@ -345,6 +345,84 @@ function setupSocketHandlers(io, db) {
     `).all(userId);
   }
 
+  function canModerateUserProxies(viewerId) {
+    const viewer = db.prepare('SELECT is_admin FROM users WHERE id = ?').get(viewerId);
+    if (viewer?.is_admin) return true;
+    return getUserEffectiveLevel(viewerId) >= 25;
+  }
+
+  function getVisibleProxiesForUser(targetUserId, viewerId) {
+    const canViewPrivate = targetUserId === viewerId || canModerateUserProxies(viewerId);
+    const rows = db.prepare(`
+      SELECT id, user_id, name, bio, avatar_url, trigger_prefix, trigger_suffix, group_name, is_public, created_at, updated_at
+      FROM proxies
+      WHERE user_id = ?
+        AND (? = 1 OR is_public = 1)
+      ORDER BY COALESCE(NULLIF(group_name, ''), 'Ungrouped') COLLATE NOCASE ASC,
+               name COLLATE NOCASE ASC,
+               id ASC
+    `).all(targetUserId, canViewPrivate ? 1 : 0);
+    return rows.map(row => ({
+      id: row.id,
+      userId: row.user_id,
+      name: row.name,
+      bio: row.bio || '',
+      avatarUrl: row.avatar_url || null,
+      triggerPrefix: row.trigger_prefix,
+      triggerSuffix: row.trigger_suffix || '',
+      groupName: row.group_name || '',
+      isPublic: !!row.is_public,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  function getProxySummary(targetUserId, viewerId) {
+    const canViewPrivate = targetUserId === viewerId || canModerateUserProxies(viewerId);
+    const counts = db.prepare(`
+      SELECT
+        SUM(CASE WHEN is_public = 1 THEN 1 ELSE 0 END) AS public_count,
+        SUM(CASE WHEN is_public = 0 THEN 1 ELSE 0 END) AS private_count
+      FROM proxies
+      WHERE user_id = ?
+    `).get(targetUserId) || {};
+    return {
+      proxyCount: canViewPrivate
+        ? Number(counts.public_count || 0) + Number(counts.private_count || 0)
+        : Number(counts.public_count || 0),
+      hiddenProxyCount: canViewPrivate ? 0 : Number(counts.private_count || 0),
+      canViewPrivate
+    };
+  }
+
+  function findMatchingProxy(userId, rawContent) {
+    const trimmed = typeof rawContent === 'string' ? rawContent.trim() : '';
+    if (!trimmed) return null;
+    const proxies = db.prepare(`
+      SELECT id, name, avatar_url, trigger_prefix, trigger_suffix
+      FROM proxies
+      WHERE user_id = ?
+      ORDER BY LENGTH(trigger_prefix) DESC, LENGTH(trigger_suffix) DESC, id ASC
+    `).all(userId);
+    for (const proxy of proxies) {
+      const prefix = proxy.trigger_prefix || '';
+      const suffix = proxy.trigger_suffix || '';
+      if (!prefix) continue;
+      if (!trimmed.startsWith(prefix)) continue;
+      if (suffix && !trimmed.endsWith(suffix)) continue;
+      const endIndex = suffix ? trimmed.length - suffix.length : trimmed.length;
+      const body = trimmed.slice(prefix.length, endIndex).trim();
+      if (!body) continue;
+      return {
+        id: proxy.id,
+        name: proxy.name,
+        avatar: proxy.avatar_url || null,
+        content: body
+      };
+    }
+    return null;
+  }
+
   function getUserHighestRole(userId, channelId = null) {
     const user = db.prepare('SELECT is_admin FROM users WHERE id = ?').get(userId);
     if (user && user.is_admin) return { name: 'Admin', level: 100, color: '#e74c3c' };
@@ -1241,7 +1319,7 @@ function setupSocketHandlers(io, db) {
       let messages;
       if (before) {
         messages = db.prepare(`
-          SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data,
+          SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.proxy_id, m.proxy_name, m.proxy_avatar,
                  COALESCE(m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape
           FROM messages m LEFT JOIN users u ON m.user_id = u.id
           WHERE m.channel_id = ? AND m.id < ?
@@ -1249,7 +1327,7 @@ function setupSocketHandlers(io, db) {
         `).all(channel.id, before, limit);
       } else if (after) {
         messages = db.prepare(`
-          SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data,
+          SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.proxy_id, m.proxy_name, m.proxy_avatar,
                  COALESCE(m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape
           FROM messages m LEFT JOIN users u ON m.user_id = u.id
           WHERE m.channel_id = ? AND m.id > ?
@@ -1257,7 +1335,7 @@ function setupSocketHandlers(io, db) {
         `).all(channel.id, after, limit);
       } else {
         messages = db.prepare(`
-          SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data,
+          SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.proxy_id, m.proxy_name, m.proxy_avatar,
                  COALESCE(m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape
           FROM messages m LEFT JOIN users u ON m.user_id = u.id
           WHERE m.channel_id = ?
@@ -1275,7 +1353,7 @@ function setupSocketHandlers(io, db) {
       if (replyIds.length > 0) {
         const ph = replyIds.map(() => '?').join(',');
         db.prepare(`
-          SELECT m.id, m.content, COALESCE(u.display_name, u.username, '[Deleted User]') as username
+          SELECT m.id, m.content, COALESCE(m.proxy_name, u.display_name, u.username, '[Deleted User]') as username
           FROM messages m LEFT JOIN users u ON m.user_id = u.id
           WHERE m.id IN (${ph})
         `).all(...replyIds).forEach(r => replyMap.set(r.id, r));
@@ -1359,6 +1437,13 @@ function setupSocketHandlers(io, db) {
           // Use stored avatar, or fall back to the webhook's current avatar
           obj.avatar = m.webhook_avatar || webhookAvatarMap.get(m.webhook_username) || null;
         }
+        if (m.proxy_id && m.proxy_name) {
+          obj.proxy_id = m.proxy_id;
+          obj.proxy_name = m.proxy_name;
+          obj.proxy_avatar = m.proxy_avatar || null;
+          obj.avatar = m.proxy_avatar || null;
+          obj.username = m.proxy_name;
+        }
         // Flag imported messages (Discord, etc.)
         if (m.imported_from) {
           obj.imported_from = m.imported_from;
@@ -1409,11 +1494,11 @@ function setupSocketHandlers(io, db) {
     socket.on('send-message', (data) => {
       if (!data || typeof data !== 'object') return;
       const code = typeof data.code === 'string' ? data.code.trim() : '';
-      const content = typeof data.content === 'string' ? data.content : '';
+      const rawContent = typeof data.content === 'string' ? data.content : '';
 
       if (!code || !/^[a-f0-9]{8}$/i.test(code)) return;
-      if (!content || content.trim().length === 0) return;
-      if (content.length > 2000) {
+      if (!rawContent || rawContent.trim().length === 0) return;
+      if (rawContent.length > 2000) {
         return socket.emit('error-msg', 'Message too long (max 2000 characters)');
       }
 
@@ -1441,7 +1526,7 @@ function setupSocketHandlers(io, db) {
 
       // Block text messages when text is disabled (allow media uploads if media is enabled)
       if (channel.text_enabled === 0) {
-        const isMedia = /^\/uploads\b/i.test(content.trim()) || /^\[file:[^\]]+\]\(/i.test(content.trim());
+        const isMedia = /^\/uploads\b/i.test(rawContent.trim()) || /^\[file:[^\]]+\]\(/i.test(rawContent.trim());
         if (!isMedia || channel.media_enabled === 0) {
           return socket.emit('error-msg', 'Text messages are disabled in this channel');
         }
@@ -1449,7 +1534,7 @@ function setupSocketHandlers(io, db) {
 
       // Block media uploads if media is disabled in this channel
       if (channel.media_enabled === 0 && !socket.user.isAdmin) {
-        const isMediaContent = /^\/uploads\b/i.test(content.trim()) || /^\[file:[^\]]+\]\(/i.test(content.trim());
+        const isMediaContent = /^\/uploads\b/i.test(rawContent.trim()) || /^\[file:[^\]]+\]\(/i.test(rawContent.trim());
         if (isMediaContent) {
           return socket.emit('error-msg', 'Media uploads are disabled in this channel');
         }
@@ -1470,11 +1555,13 @@ function setupSocketHandlers(io, db) {
 
       // ── Slash commands ────────────────────────────────
       // Skip slash command parsing for image uploads and file paths
-      const trimmed = content.trim();
+      const trimmed = rawContent.trim();
       const isImage = data.isImage === true;
       const isUpload = /^\/uploads\b/i.test(trimmed);
       const isPath = trimmed.startsWith('/') && trimmed.indexOf('/', 1) !== -1;
-      const slashMatch = (!isImage && !isUpload && !isPath) ? trimmed.match(/^\/([a-zA-Z]+)(?:\s+(.*))?$/) : null;
+      const proxyMatch = (!isImage && !isUpload && !isPath) ? findMatchingProxy(socket.user.id, rawContent) : null;
+      const messageText = proxyMatch ? proxyMatch.content : trimmed;
+      const slashMatch = (!proxyMatch && !isImage && !isUpload && !isPath) ? trimmed.match(/^\/([a-zA-Z]+)(?:\s+(.*))?$/) : null;
       if (slashMatch) {
         const cmd = slashMatch[1].toLowerCase();
         const arg = (slashMatch[2] || '').trim();
@@ -1483,8 +1570,8 @@ function setupSocketHandlers(io, db) {
           const finalContent = slashResult.content;
 
           const result = db.prepare(
-            'INSERT INTO messages (channel_id, user_id, content, reply_to) VALUES (?, ?, ?, ?)'
-          ).run(channel.id, socket.user.id, finalContent, null);
+            'INSERT INTO messages (channel_id, user_id, content, reply_to, proxy_id, proxy_name, proxy_avatar) VALUES (?, ?, ?, ?, ?, ?, ?)'
+          ).run(channel.id, socket.user.id, finalContent, null, null, null, null);
 
           const message = {
             id: result.lastInsertRowid,
@@ -1522,32 +1609,37 @@ function setupSocketHandlers(io, db) {
       const replyTo = isInt(data.replyTo) ? data.replyTo : null;
 
       // Server-side sanitization (defense-in-depth — client also escapes)
-      const safeContent = sanitizeText(content.trim());
+      const safeContent = sanitizeText(messageText);
       if (!safeContent) return;
 
       try {
         const result = db.prepare(
-          'INSERT INTO messages (channel_id, user_id, content, reply_to) VALUES (?, ?, ?, ?)'
-        ).run(channel.id, socket.user.id, safeContent, replyTo);
+          'INSERT INTO messages (channel_id, user_id, content, reply_to, proxy_id, proxy_name, proxy_avatar) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        ).run(channel.id, socket.user.id, safeContent, replyTo, proxyMatch?.id || null, proxyMatch?.name || null, proxyMatch?.avatar || null);
 
         const message = {
           id: result.lastInsertRowid,
           content: safeContent,
           created_at: new Date().toISOString(),
-          username: socket.user.displayName,
+          username: proxyMatch?.name || socket.user.displayName,
           user_id: socket.user.id,
-          avatar: socket.user.avatar || null,
+          avatar: proxyMatch?.avatar || socket.user.avatar || null,
           avatar_shape: socket.user.avatar_shape || 'circle',
           reply_to: replyTo,
           replyContext: null,
           reactions: [],
           edited_at: null
         };
+        if (proxyMatch) {
+          message.proxy_id = proxyMatch.id;
+          message.proxy_name = proxyMatch.name;
+          message.proxy_avatar = proxyMatch.avatar || null;
+        }
 
         // Attach reply context if replying
         if (replyTo) {
           message.replyContext = db.prepare(`
-            SELECT m.id, m.content, COALESCE(u.display_name, u.username, '[Deleted User]') as username FROM messages m
+            SELECT m.id, m.content, COALESCE(m.proxy_name, u.display_name, u.username, '[Deleted User]') as username FROM messages m
             LEFT JOIN users u ON m.user_id = u.id WHERE m.id = ?
           `).get(replyTo) || null;
         }
@@ -1555,7 +1647,7 @@ function setupSocketHandlers(io, db) {
         io.to(`channel:${code}`).emit('new-message', { channelCode: code, message });
 
         // Send push notifications to offline channel members
-        sendPushNotifications(channel.id, code, channel.name, socket.user.id, socket.user.displayName, safeContent);
+        sendPushNotifications(channel.id, code, channel.name, socket.user.id, proxyMatch?.name || socket.user.displayName, safeContent);
 
         // Auto-update sender's read position so own messages never count as unread
         try {
@@ -3604,7 +3696,7 @@ function setupSocketHandlers(io, db) {
       const key = typeof data.key === 'string' ? data.key.trim() : '';
       const value = typeof data.value === 'string' ? data.value.trim() : '';
 
-      const allowedKeys = ['member_visibility', 'cleanup_enabled', 'cleanup_max_age_days', 'cleanup_max_size_mb', 'giphy_api_key', 'server_name', 'server_title', 'server_icon', 'permission_thresholds', 'tunnel_enabled', 'tunnel_provider', 'server_code', 'max_upload_mb', 'max_poll_options', 'max_sound_kb', 'max_emoji_kb', 'setup_wizard_complete', 'update_banner_admin_only', 'default_theme', 'channel_sort_mode'];
+      const allowedKeys = ['member_visibility', 'cleanup_enabled', 'cleanup_max_age_days', 'cleanup_max_size_mb', 'giphy_api_key', 'server_name', 'server_title', 'server_icon', 'permission_thresholds', 'tunnel_enabled', 'tunnel_provider', 'server_code', 'max_upload_mb', 'max_poll_options', 'max_sound_kb', 'max_emoji_kb', 'max_proxy_avatar_kb', 'setup_wizard_complete', 'update_banner_admin_only', 'default_theme', 'channel_sort_mode'];
       if (!allowedKeys.includes(key)) return;
 
       if (key === 'member_visibility' && !['all', 'online', 'none'].includes(value)) return;
@@ -3632,6 +3724,10 @@ function setupSocketHandlers(io, db) {
       if (key === 'max_emoji_kb') {
         const n = parseInt(value);
         if (isNaN(n) || n < 64 || n > 1024) return;
+      }
+      if (key === 'max_proxy_avatar_kb') {
+        const n = parseInt(value);
+        if (isNaN(n) || n < 32 || n > 2048) return;
       }
       if (key === 'giphy_api_key') {
         // Allow empty value to clear the key, otherwise validate format
@@ -4007,6 +4103,8 @@ function setupSocketHandlers(io, db) {
           if (s.user && s.user.id === data.userId) { isOnline = true; break; }
         }
 
+        const proxySummary = getProxySummary(data.userId, socket.user.id);
+
         socket.emit('user-profile', {
           id: row.id,
           username: row.username,
@@ -4018,7 +4116,10 @@ function setupSocketHandlers(io, db) {
           bio: row.bio || '',
           roles: roles,
           online: isOnline,
-          createdAt: row.created_at
+          createdAt: row.created_at,
+          proxyCount: proxySummary.proxyCount,
+          hiddenProxyCount: proxySummary.hiddenProxyCount,
+          canViewPrivateProxies: proxySummary.canViewPrivate
         });
       } catch (err) {
         console.error('Get user profile error:', err);
@@ -4037,6 +4138,91 @@ function setupSocketHandlers(io, db) {
     });
 
     // ═══════════════ PUSH NOTIFICATIONS ═════════════════════
+
+    socket.on('get-my-proxies', (cb) => {
+      const callback = typeof cb === 'function' ? cb : () => {};
+      try {
+        callback({ proxies: getVisibleProxiesForUser(socket.user.id, socket.user.id) });
+      } catch (err) {
+        console.error('Get my proxies error:', err);
+        callback({ error: 'Failed to load proxies' });
+      }
+    });
+
+    socket.on('get-user-proxies', (data, cb) => {
+      const callback = typeof cb === 'function' ? cb : () => {};
+      const userId = isInt(data?.userId) ? data.userId : null;
+      if (!userId) return callback({ error: 'Invalid user' });
+      try {
+        callback({
+          userId,
+          proxies: getVisibleProxiesForUser(userId, socket.user.id),
+          canManage: userId === socket.user.id,
+          canViewPrivate: userId === socket.user.id || canModerateUserProxies(socket.user.id)
+        });
+      } catch (err) {
+        console.error('Get user proxies error:', err);
+        callback({ error: 'Failed to load proxy library' });
+      }
+    });
+
+    socket.on('save-proxy', (data, cb) => {
+      const callback = typeof cb === 'function' ? cb : () => {};
+      if (!data || typeof data !== 'object') return callback({ error: 'Invalid request' });
+
+      const proxyId = isInt(data.id) ? data.id : null;
+      const name = sanitizeText(String(data.name || '').trim()).slice(0, 40);
+      const bio = sanitizeText(String(data.bio || '').trim()).slice(0, 190);
+      const triggerPrefix = String(data.triggerPrefix || '').trim().slice(0, 40);
+      const triggerSuffix = String(data.triggerSuffix || '').trim().slice(0, 40);
+      const groupName = sanitizeText(String(data.groupName || '').trim()).slice(0, 30);
+      const avatarUrl = data.avatarUrl ? String(data.avatarUrl).trim() : '';
+      const isPublic = data.isPublic !== false;
+
+      if (!name) return callback({ error: 'Proxy name is required' });
+      if (!triggerPrefix) return callback({ error: 'Trigger prefix is required' });
+      if (avatarUrl && !isValidUploadPath(avatarUrl)) return callback({ error: 'Invalid proxy avatar' });
+
+      try {
+        if (proxyId) {
+          const existing = db.prepare('SELECT id, user_id FROM proxies WHERE id = ?').get(proxyId);
+          if (!existing || existing.user_id !== socket.user.id) return callback({ error: 'Proxy not found' });
+          db.prepare(`
+            UPDATE proxies
+            SET name = ?, bio = ?, avatar_url = ?, trigger_prefix = ?, trigger_suffix = ?, group_name = ?, is_public = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `).run(name, bio, avatarUrl || null, triggerPrefix, triggerSuffix, groupName, isPublic ? 1 : 0, proxyId);
+        } else {
+          const count = db.prepare('SELECT COUNT(*) AS cnt FROM proxies WHERE user_id = ?').get(socket.user.id)?.cnt || 0;
+          if (count >= 100) return callback({ error: 'You can create up to 100 proxies' });
+          db.prepare(`
+            INSERT INTO proxies (user_id, name, bio, avatar_url, trigger_prefix, trigger_suffix, group_name, is_public)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(socket.user.id, name, bio, avatarUrl || null, triggerPrefix, triggerSuffix, groupName, isPublic ? 1 : 0);
+        }
+
+        callback({ ok: true, proxies: getVisibleProxiesForUser(socket.user.id, socket.user.id) });
+      } catch (err) {
+        console.error('Save proxy error:', err);
+        callback({ error: 'Failed to save proxy' });
+      }
+    });
+
+    socket.on('delete-proxy', (data, cb) => {
+      const callback = typeof cb === 'function' ? cb : () => {};
+      const proxyId = isInt(data?.id) ? data.id : null;
+      if (!proxyId) return callback({ error: 'Invalid proxy' });
+
+      try {
+        const existing = db.prepare('SELECT id, user_id FROM proxies WHERE id = ?').get(proxyId);
+        if (!existing || existing.user_id !== socket.user.id) return callback({ error: 'Proxy not found' });
+        db.prepare('DELETE FROM proxies WHERE id = ?').run(proxyId);
+        callback({ ok: true, proxies: getVisibleProxiesForUser(socket.user.id, socket.user.id) });
+      } catch (err) {
+        console.error('Delete proxy error:', err);
+        callback({ error: 'Failed to delete proxy' });
+      }
+    });
 
     socket.on('push-subscribe', (data) => {
       if (!data || typeof data !== 'object') return;
