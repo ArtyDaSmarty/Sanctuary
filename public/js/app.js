@@ -195,7 +195,6 @@ class HavenApp {
     this._setupLightbox();
     this._setupOnlineOverlay();
     this._setupModalExpand();
-    this._checkForUpdates();
     this._initDesktopAppBanner();
     this._initAndroidBetaBanner();
     this._initMoveMessages();
