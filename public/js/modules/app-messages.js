@@ -543,9 +543,12 @@ _createMessageEl(msg, prevMsg) {
     ? `<span class="user-role-badge msg-role-badge" style="color:${this._safeColor(onlineUser.role.color, 'var(--text-muted)')}">${this._escapeHtml(onlineUser.role.name)}</span>`
     : '';
 
+  const proxyBadge = msg.proxy_name
+    ? `<span class="bot-badge">${msg.proxy_type === 'character' ? 'CHARACTER' : 'ALTER'}</span>`
+    : '';
   const botBadge = msg.imported_from === 'discord'
     ? '<span class="discord-badge">DISCORD</span>'
-    : msg.is_webhook ? '<span class="bot-badge">BOT</span>' : msg.proxy_name ? '<span class="bot-badge">PROXY</span>' : '';
+    : msg.is_webhook ? '<span class="bot-badge">BOT</span>' : proxyBadge;
 
   const el = document.createElement('div');
   el.className = 'message' + (isImage ? ' message-has-image' : '') + (msg.pinned ? ' pinned' : '') + (msg.is_archived ? ' archived' : '') + (msg.is_webhook ? ' webhook-message' : '') + (msg.imported_from ? ' imported-message' : '') + (isAnnouncement ? ' announcement' : '');
