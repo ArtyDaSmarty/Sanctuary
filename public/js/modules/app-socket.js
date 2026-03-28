@@ -133,6 +133,7 @@ _setupSocketListeners() {
     this.socket.emit('get-channels');
     this.socket.emit('get-server-settings');
     if (this.currentChannel) {
+      const currentChannelMeta = this.channels?.find(c => c.code === this.currentChannel);
       this.socket.emit('enter-channel', { code: this.currentChannel });
       // Reset pagination — reconnect replaces message list
       this._oldestMsgId = null;
@@ -144,9 +145,11 @@ _setupSocketListeners() {
       this._loadingFuture = false;
       this._historyAfter = null;
       this.socket.emit('get-messages', { code: this.currentChannel });
-      this.socket.emit('get-channel-members', { code: this.currentChannel });
-      // Request fresh voice list for this channel
-      this.socket.emit('request-voice-users', { code: this.currentChannel });
+      if (currentChannelMeta?.special_section !== 'announcements') {
+        this.socket.emit('get-channel-members', { code: this.currentChannel });
+        // Request fresh voice list for this channel
+        this.socket.emit('request-voice-users', { code: this.currentChannel });
+      }
     }
     // Re-join voice if we were in voice before reconnect
     if (this.voice && this.voice.inVoice && this.voice.currentChannel) {
@@ -196,6 +199,7 @@ _setupSocketListeners() {
       if (sinceLast < 3000) return;
       // Re-fetch current channel messages + member list to catch anything missed
       if (this.currentChannel && this.socket?.connected) {
+        const currentChannelMeta = this.channels?.find(c => c.code === this.currentChannel);
         this._oldestMsgId = null;
         this._noMoreHistory = false;
         this._loadingHistory = false;
@@ -205,7 +209,9 @@ _setupSocketListeners() {
         this._loadingFuture = false;
         this._historyAfter = null;
         this.socket.emit('get-messages', { code: this.currentChannel });
-        this.socket.emit('get-channel-members', { code: this.currentChannel });
+        if (currentChannelMeta?.special_section !== 'announcements') {
+          this.socket.emit('get-channel-members', { code: this.currentChannel });
+        }
       }
       // Re-fetch channels in case list changed while backgrounded
       this.socket?.emit('get-channels');
@@ -329,7 +335,9 @@ _setupSocketListeners() {
         this._loadingFuture = false;
         this._historyAfter = null;
         this.socket.emit('get-messages', { code: this.currentChannel });
-        this.socket.emit('get-channel-members', { code: this.currentChannel });
+        if (updated.special_section !== 'announcements') {
+          this.socket.emit('get-channel-members', { code: this.currentChannel });
+        }
       }
     }
   });
