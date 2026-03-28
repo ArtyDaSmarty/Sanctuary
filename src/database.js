@@ -125,6 +125,7 @@ function initDatabase() {
       name TEXT NOT NULL,
       code TEXT UNIQUE NOT NULL,
       icon_url TEXT DEFAULT '',
+      theme TEXT DEFAULT '',
       legacy_name TEXT DEFAULT NULL,
       is_legacy_main INTEGER NOT NULL DEFAULT 0,
       created_by INTEGER REFERENCES users(id),
@@ -198,6 +199,11 @@ function initDatabase() {
   } catch {
     db.exec("ALTER TABLE servers ADD COLUMN is_legacy_main INTEGER NOT NULL DEFAULT 0");
   }
+  try {
+    db.prepare("SELECT theme FROM servers LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE servers ADD COLUMN theme TEXT DEFAULT ''");
+  }
 
   // ── Migration: high_scores table ────────────────────────
   db.exec(`
@@ -228,6 +234,11 @@ function initDatabase() {
   insertSetting.run('cleanup_enabled', 'false');       // auto-cleanup toggle
   insertSetting.run('cleanup_max_age_days', '0');      // delete messages older than N days (0 = disabled)
   insertSetting.run('cleanup_max_size_mb', '0');       // delete oldest messages when DB exceeds N MB (0 = disabled)
+  insertSetting.run('cleanup_messages_mb', '0');       // delete oldest message bodies until under limit
+  insertSetting.run('cleanup_attachments_mb', '0');    // delete oldest attachments until under limit
+  insertSetting.run('cleanup_emojis_mb', '0');         // delete oldest custom emojis until under limit
+  insertSetting.run('cleanup_sounds_mb', '0');         // delete oldest custom sounds until under limit
+  insertSetting.run('cleanup_proxy_avatars_mb', '0');  // delete oldest proxy avatars until under limit
   insertSetting.run('whitelist_enabled', 'false');     // whitelist toggle
   insertSetting.run('server_name', 'HAVEN');           // displayed in sidebar header + server bar
   insertSetting.run('server_icon', '');                // path to uploaded server icon image
@@ -433,6 +444,7 @@ function initDatabase() {
       scope TEXT NOT NULL DEFAULT 'server',
       color TEXT DEFAULT NULL,
       auto_assign INTEGER NOT NULL DEFAULT 0,
+      is_cosmetic INTEGER NOT NULL DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -509,6 +521,11 @@ function initDatabase() {
     db.exec('ALTER TABLE roles ADD COLUMN auto_assign INTEGER NOT NULL DEFAULT 0');
     // Mark the existing "User" role as auto-assign for backwards compat
     db.prepare("UPDATE roles SET auto_assign = 1 WHERE name = 'User' AND level = 1 AND scope = 'server'").run();
+  }
+  try {
+    db.prepare('SELECT is_cosmetic FROM roles LIMIT 0').get();
+  } catch {
+    db.exec('ALTER TABLE roles ADD COLUMN is_cosmetic INTEGER NOT NULL DEFAULT 0');
   }
 
   // ── Migration: auto-assign flagged roles to all existing users who lack any server role ──
@@ -819,6 +836,7 @@ function initDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
+      proxy_type TEXT NOT NULL DEFAULT 'alter',
       bio TEXT DEFAULT '',
       avatar_url TEXT DEFAULT NULL,
       trigger_prefix TEXT NOT NULL,
@@ -831,6 +849,11 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_proxies_user ON proxies(user_id);
     CREATE INDEX IF NOT EXISTS idx_proxies_user_trigger ON proxies(user_id, trigger_prefix);
   `);
+  try {
+    db.prepare("SELECT proxy_type FROM proxies LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE proxies ADD COLUMN proxy_type TEXT NOT NULL DEFAULT 'alter'");
+  }
 
   try {
     db.prepare("SELECT proxy_id FROM messages LIMIT 0").get();
@@ -846,6 +869,11 @@ function initDatabase() {
     db.prepare("SELECT proxy_avatar FROM messages LIMIT 0").get();
   } catch {
     db.exec("ALTER TABLE messages ADD COLUMN proxy_avatar TEXT DEFAULT NULL");
+  }
+  try {
+    db.prepare("SELECT proxy_type FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN proxy_type TEXT DEFAULT NULL");
   }
 
   // ── Migration: grant use_tts to all auto-assign roles (default ON) ──
