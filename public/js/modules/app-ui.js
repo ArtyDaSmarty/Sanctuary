@@ -4027,10 +4027,27 @@ _prepareSettingsLayout() {
   }
 
   if (settingsBody) {
-    if (sessionSection) settingsBody.insertBefore(sessionSection, adminPanel || null);
-    if (subserverSection) settingsBody.insertBefore(subserverSection, adminPanel || null);
-    if (serverChannelsSection) settingsBody.insertBefore(serverChannelsSection, adminPanel || null);
-    if (inviteSection) settingsBody.insertBefore(inviteSection, adminPanel || null);
+    const orderedSections = [
+      'section-density',
+      'section-sounds',
+      'section-push',
+      'section-proxies',
+      'section-password',
+      'section-2fa',
+      'section-recovery',
+      'section-delete-account',
+      'section-plugins',
+      'section-desktop-shortcuts',
+      'section-desktop-app',
+      'section-logout',
+      'section-server-customization',
+      'section-server-channels',
+      'section-invite'
+    ];
+    orderedSections.forEach((id) => {
+      const section = document.getElementById(id);
+      if (section) settingsBody.insertBefore(section, adminPanel || null);
+    });
   }
 
   if (settingsBody && !document.getElementById('section-admin-password-reset')) {
