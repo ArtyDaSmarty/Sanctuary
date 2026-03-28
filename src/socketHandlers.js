@@ -225,18 +225,38 @@ function setupSocketHandlers(io, db) {
     return [channelId];
   }
 
+  function getChannelServerId(channelId) {
+    if (!channelId) return null;
+    const row = db.prepare('SELECT server_id FROM channels WHERE id = ?').get(channelId);
+    return row?.server_id || null;
+  }
+
   function getUserEffectiveLevel(userId, channelId = null) {
     // Admin is always level 100
     const user = db.prepare('SELECT is_admin FROM users WHERE id = ?').get(userId);
     if (user && user.is_admin) return 100;
 
-    // Check server-scoped roles first (highest level wins, using custom_level if set)
-    const serverRole = db.prepare(`
+    const serverId = getChannelServerId(channelId);
+
+    // Big-instance roles apply everywhere.
+    const instanceRole = db.prepare(`
       SELECT MAX(COALESCE(ur.custom_level, r.level)) as maxLevel FROM roles r
       JOIN user_roles ur ON r.id = ur.role_id
-      WHERE ur.user_id = ? AND r.scope = 'server' AND ur.channel_id IS NULL
+      WHERE ur.user_id = ? AND r.scope = 'server' AND ur.channel_id IS NULL AND ur.server_id IS NULL
     `).get(userId);
-    let level = (serverRole && serverRole.maxLevel) || 0;
+    let level = (instanceRole && instanceRole.maxLevel) || 0;
+
+    // Sub-server roles apply across every channel in that pseudo-server.
+    if (serverId) {
+      const subserverRole = db.prepare(`
+        SELECT MAX(COALESCE(ur.custom_level, r.level)) as maxLevel FROM roles r
+        JOIN user_roles ur ON r.id = ur.role_id
+        WHERE ur.user_id = ? AND r.scope = 'server' AND ur.channel_id IS NULL AND ur.server_id = ?
+      `).get(userId, serverId);
+      if (subserverRole?.maxLevel && subserverRole.maxLevel > level) {
+        level = subserverRole.maxLevel;
+      }
+    }
 
     // If channel specified, check roles for the channel + parent (inheritance)
     if (channelId) {
@@ -270,10 +290,32 @@ function setupSocketHandlers(io, db) {
 
     // Check per-user permission overrides first (explicit deny takes priority)
     try {
-      const override = db.prepare(`
-        SELECT allowed FROM user_role_perms WHERE user_id = ? AND permission = ?
-        ORDER BY allowed ASC LIMIT 1
-      `).get(userId, permission);
+      const serverId = getChannelServerId(channelId);
+      let override = null;
+      if (channelId) {
+        override = db.prepare(`
+          SELECT allowed
+          FROM user_role_perms
+          WHERE user_id = ? AND permission = ? AND channel_id = ?
+          ORDER BY allowed ASC LIMIT 1
+        `).get(userId, permission, channelId);
+      }
+      if (!override && serverId) {
+        override = db.prepare(`
+          SELECT allowed
+          FROM user_role_perms
+          WHERE user_id = ? AND permission = ? AND channel_id IS NULL AND server_id = ?
+          ORDER BY allowed ASC LIMIT 1
+        `).get(userId, permission, serverId);
+      }
+      if (!override) {
+        override = db.prepare(`
+          SELECT allowed
+          FROM user_role_perms
+          WHERE user_id = ? AND permission = ? AND channel_id IS NULL AND server_id IS NULL
+          ORDER BY allowed ASC LIMIT 1
+        `).get(userId, permission);
+      }
       if (override) {
         if (override.allowed === 0) return false;
         if (override.allowed === 1) return true;
@@ -283,19 +325,33 @@ function setupSocketHandlers(io, db) {
     // Check level-based permission thresholds
     const thresholds = getPermissionThresholds();
     if (thresholds[permission]) {
-      const level = getUserEffectiveLevel(userId);
+      const level = getUserEffectiveLevel(userId, channelId);
       if (level >= thresholds[permission]) return true;
     }
 
-    // Check server-scoped roles
-    const serverPerm = db.prepare(`
+    // Check big-instance roles
+    const instancePerm = db.prepare(`
       SELECT rp.allowed FROM role_permissions rp
       JOIN roles r ON rp.role_id = r.id
       JOIN user_roles ur ON r.id = ur.role_id
-      WHERE ur.user_id = ? AND rp.permission = ? AND r.scope = 'server' AND ur.channel_id IS NULL AND rp.allowed = 1
+      WHERE ur.user_id = ? AND rp.permission = ? AND r.scope = 'server'
+        AND ur.channel_id IS NULL AND ur.server_id IS NULL AND rp.allowed = 1
       LIMIT 1
     `).get(userId, permission);
-    if (serverPerm) return true;
+    if (instancePerm) return true;
+
+    const serverId = getChannelServerId(channelId);
+    if (serverId) {
+      const subserverPerm = db.prepare(`
+        SELECT rp.allowed FROM role_permissions rp
+        JOIN roles r ON rp.role_id = r.id
+        JOIN user_roles ur ON r.id = ur.role_id
+        WHERE ur.user_id = ? AND rp.permission = ? AND r.scope = 'server'
+          AND ur.channel_id IS NULL AND ur.server_id = ? AND rp.allowed = 1
+        LIMIT 1
+      `).get(userId, permission, serverId);
+      if (subserverPerm) return true;
+    }
 
     // Check channel-scoped roles (with inheritance: parent channel roles cascade to subs)
     if (channelId) {
@@ -313,6 +369,46 @@ function setupSocketHandlers(io, db) {
       }
     }
     return false;
+  }
+
+  function userHasServerPermission(userId, permission, serverId = null) {
+    const user = db.prepare('SELECT is_admin FROM users WHERE id = ?').get(userId);
+    if (user?.is_admin) return true;
+
+    if (!serverId) return userHasPermission(userId, permission);
+
+    try {
+      const override = db.prepare(`
+        SELECT allowed
+        FROM user_role_perms
+        WHERE user_id = ? AND permission = ? AND channel_id IS NULL AND (server_id = ? OR server_id IS NULL)
+        ORDER BY CASE WHEN server_id = ? THEN 0 ELSE 1 END, allowed ASC
+        LIMIT 1
+      `).get(userId, permission, serverId, serverId);
+      if (override) {
+        if (override.allowed === 0) return false;
+        if (override.allowed === 1) return true;
+      }
+    } catch {}
+
+    const thresholds = getPermissionThresholds();
+    if (thresholds[permission]) {
+      const level = getUserEffectiveLevel(userId, db.prepare('SELECT id FROM channels WHERE server_id = ? AND is_dm = 0 ORDER BY id LIMIT 1').get(serverId)?.id || null);
+      if (level >= thresholds[permission]) return true;
+    }
+
+    const scopedPerm = db.prepare(`
+      SELECT 1
+      FROM role_permissions rp
+      JOIN roles r ON rp.role_id = r.id
+      JOIN user_roles ur ON r.id = ur.role_id
+      WHERE ur.user_id = ? AND rp.permission = ? AND r.scope = 'server'
+        AND ur.channel_id IS NULL
+        AND (ur.server_id = ? OR ur.server_id IS NULL)
+        AND rp.allowed = 1
+      LIMIT 1
+    `).get(userId, permission, serverId);
+    return !!scopedPerm;
   }
 
   function getUserPermissions(userId) {
@@ -352,12 +448,12 @@ function setupSocketHandlers(io, db) {
 
   function getUserRoles(userId) {
     return db.prepare(`
-      SELECT r.id, r.name, r.level, r.scope, r.color, ur.channel_id
+      SELECT r.id, r.name, COALESCE(ur.custom_level, r.level) AS level, r.scope, r.color, ur.server_id, ur.channel_id
       FROM roles r
       JOIN user_roles ur ON r.id = ur.role_id
       WHERE ur.user_id = ?
-      GROUP BY r.id, COALESCE(ur.channel_id, -1)
-      ORDER BY r.level DESC
+      GROUP BY r.id, COALESCE(ur.server_id, -1), COALESCE(ur.channel_id, -1)
+      ORDER BY COALESCE(ur.custom_level, r.level) DESC
     `).all(userId);
   }
 
@@ -443,13 +539,25 @@ function setupSocketHandlers(io, db) {
     const user = db.prepare('SELECT is_admin FROM users WHERE id = ?').get(userId);
     if (user && user.is_admin) return { name: 'Admin', level: 100, color: '#e74c3c' };
 
-    // Server-scoped roles (also catches channel-scope roles assigned without a channel_id)
+    const serverId = getChannelServerId(channelId);
+
+    // Big-instance roles
     let role = db.prepare(`
       SELECT r.name, COALESCE(ur.custom_level, r.level) as level, r.color FROM roles r
       JOIN user_roles ur ON r.id = ur.role_id
-      WHERE ur.user_id = ? AND ur.channel_id IS NULL
+      WHERE ur.user_id = ? AND ur.channel_id IS NULL AND ur.server_id IS NULL
       ORDER BY COALESCE(ur.custom_level, r.level) DESC LIMIT 1
     `).get(userId);
+
+    if (serverId) {
+      const subserverRole = db.prepare(`
+        SELECT r.name, COALESCE(ur.custom_level, r.level) as level, r.color FROM roles r
+        JOIN user_roles ur ON r.id = ur.role_id
+        WHERE ur.user_id = ? AND ur.channel_id IS NULL AND ur.server_id = ?
+        ORDER BY COALESCE(ur.custom_level, r.level) DESC LIMIT 1
+      `).get(userId, serverId);
+      if (subserverRole && (!role || subserverRole.level > role.level)) role = subserverRole;
+    }
 
     if (channelId) {
       const chain = getChannelRoleChain(channelId);
@@ -476,7 +584,7 @@ function setupSocketHandlers(io, db) {
   }
 
   function getMainServer() {
-    return db.prepare("SELECT * FROM servers WHERE name = 'Main' ORDER BY id LIMIT 1").get();
+    return db.prepare("SELECT * FROM servers WHERE is_legacy_main = 1 OR name = 'Main' ORDER BY is_legacy_main DESC, id LIMIT 1").get();
   }
 
   function getVisibleServers(userId, isAdmin) {
@@ -1134,7 +1242,8 @@ function setupSocketHandlers(io, db) {
     // ── Create channel (permission-based) ─────────────────
     socket.on('create-channel', (data) => {
       if (!data || typeof data !== 'object') return;
-      if (!userHasPermission(socket.user.id, 'create_channel')) {
+      const requestedServerId = Number(data.serverId);
+      if (!userHasServerPermission(socket.user.id, 'create_channel', Number.isInteger(requestedServerId) ? requestedServerId : null)) {
         return socket.emit('error-msg', 'You don\'t have permission to create channels');
       }
 
@@ -1153,7 +1262,6 @@ function setupSocketHandlers(io, db) {
       const code = generateChannelCode();
       const channelType = data.channelType === 'forum' ? 'forum' : 'standard';
       const isPrivate = data.isPrivate ? 1 : 0;
-      const requestedServerId = Number(data.serverId);
       const targetServer = getServerByIdForUser(requestedServerId, socket.user.id, socket.user.isAdmin)
         || getVisibleServers(socket.user.id, socket.user.isAdmin)[0]
         || getMainServer();
@@ -1291,9 +1399,10 @@ function setupSocketHandlers(io, db) {
         // Auto-assign roles flagged as auto_assign to this user (if they don't already have them)
         try {
           const autoRoles = db.prepare('SELECT id FROM roles WHERE auto_assign = 1').all();
-          const insertAutoRole = db.prepare('INSERT OR IGNORE INTO user_roles (user_id, role_id, channel_id, granted_by) VALUES (?, ?, NULL, NULL)');
+          const mainServerId = getMainServer()?.id || null;
+          const insertAutoRole = db.prepare('INSERT OR IGNORE INTO user_roles (user_id, role_id, server_id, channel_id, granted_by) VALUES (?, ?, ?, NULL, NULL)');
           for (const ar of autoRoles) {
-            insertAutoRole.run(socket.user.id, ar.id);
+            insertAutoRole.run(socket.user.id, ar.id, mainServerId);
             applyRoleChannelAccess(ar.id, socket.user.id, 'grant');
           }
         } catch { /* non-critical */ }
@@ -4018,7 +4127,7 @@ function setupSocketHandlers(io, db) {
       const key = typeof data.key === 'string' ? data.key.trim() : '';
       const value = typeof data.value === 'string' ? data.value.trim() : '';
 
-      const allowedKeys = ['member_visibility', 'cleanup_enabled', 'cleanup_max_age_days', 'cleanup_max_size_mb', 'giphy_api_key', 'server_name', 'server_title', 'server_icon', 'permission_thresholds', 'tunnel_enabled', 'tunnel_provider', 'server_code', 'max_upload_mb', 'max_poll_options', 'max_sound_kb', 'max_emoji_kb', 'max_proxy_avatar_kb', 'setup_wizard_complete', 'update_banner_admin_only', 'default_theme', 'channel_sort_mode'];
+      const allowedKeys = ['member_visibility', 'cleanup_enabled', 'cleanup_max_age_days', 'cleanup_max_size_mb', 'giphy_api_key', 'server_name', 'server_title', 'server_icon', 'permission_thresholds', 'tunnel_enabled', 'tunnel_provider', 'server_code', 'max_upload_mb', 'max_poll_options', 'max_sound_kb', 'max_emoji_kb', 'max_proxy_avatar_kb', 'setup_wizard_complete', 'default_theme', 'channel_sort_mode'];
       if (!allowedKeys.includes(key)) return;
 
       if (key === 'member_visibility' && !['all', 'online', 'none'].includes(value)) return;
@@ -4067,7 +4176,6 @@ function setupSocketHandlers(io, db) {
       if (key === 'tunnel_enabled' && !['true', 'false'].includes(value)) return;
       if (key === 'tunnel_provider' && !['localtunnel', 'cloudflared'].includes(value)) return;
       if (key === 'setup_wizard_complete' && !['true', 'false'].includes(value)) return;
-      if (key === 'update_banner_admin_only' && !['true', 'false'].includes(value)) return;
       if (key === 'channel_sort_mode' && !['manual', 'alpha', 'created', 'oldest', 'dynamic'].includes(value)) return;
       if (key === 'default_theme') {
         const validThemes = ['', 'haven', 'discord', 'matrix', 'fallout', 'ffx', 'ice', 'nord', 'darksouls', 'eldenring', 'bloodborne', 'cyberpunk', 'lotr', 'abyss', 'scripture', 'chapel', 'gospel', 'tron', 'halo', 'dracula', 'win95'];
@@ -4922,9 +5030,10 @@ function setupSocketHandlers(io, db) {
       // Auto-assign roles
       try {
         const autoRoles = db.prepare('SELECT id FROM roles WHERE auto_assign = 1').all();
-        const insertAutoRole = db.prepare('INSERT OR IGNORE INTO user_roles (user_id, role_id, channel_id, granted_by) VALUES (?, ?, NULL, NULL)');
+        const mainServerId = getMainServer()?.id || null;
+        const insertAutoRole = db.prepare('INSERT OR IGNORE INTO user_roles (user_id, role_id, server_id, channel_id, granted_by) VALUES (?, ?, ?, NULL, NULL)');
         for (const ar of autoRoles) {
-          insertAutoRole.run(targetUserId, ar.id);
+          insertAutoRole.run(targetUserId, ar.id, mainServerId);
           applyRoleChannelAccess(ar.id, targetUserId, 'grant');
         }
       } catch { /* non-critical */ }
@@ -5556,7 +5665,7 @@ function setupSocketHandlers(io, db) {
       const code = typeof data.code === 'string' ? data.code.trim() : '';
       if (!code || !/^[a-f0-9]{8}$/i.test(code)) return cb({ error: 'Invalid channel' });
 
-      const channel = db.prepare('SELECT id, name FROM channels WHERE code = ?').get(code);
+      const channel = db.prepare('SELECT id, name, server_id FROM channels WHERE code = ?').get(code);
       if (!channel) return cb({ error: 'Channel not found' });
 
       // Get all channel members
@@ -5575,13 +5684,17 @@ function setupSocketHandlers(io, db) {
       if (memberIds.length > 0) {
         const placeholders = memberIds.map(() => '?').join(',');
         const roleRows = db.prepare(`
-          SELECT ur.user_id, r.id as role_id, r.name, r.level, r.color, ur.channel_id
+          SELECT ur.user_id, r.id as role_id, r.name, r.level, r.color, ur.server_id, ur.channel_id
           FROM user_roles ur
           JOIN roles r ON ur.role_id = r.id
           WHERE ur.user_id IN (${placeholders})
-            AND (ur.channel_id IS NULL OR ur.channel_id = ?)
+            AND (
+              (ur.channel_id IS NULL AND ur.server_id IS NULL)
+              OR (ur.channel_id IS NULL AND ur.server_id = ?)
+              OR ur.channel_id = ?
+            )
           ORDER BY r.level DESC
-        `).all(...memberIds, channel.id);
+        `).all(...memberIds, channel.server_id, channel.id);
         roleRows.forEach(row => {
           if (!userRolesMap[row.user_id]) userRolesMap[row.user_id] = [];
           userRolesMap[row.user_id].push({
@@ -5589,7 +5702,9 @@ function setupSocketHandlers(io, db) {
             name: row.name,
             level: row.level,
             color: row.color,
-            scope: row.channel_id ? 'channel' : 'server'
+            serverId: row.server_id || null,
+            channelId: row.channel_id || null,
+            scope: row.channel_id ? 'channel' : (row.server_id ? 'subserver' : 'server')
           });
         });
       }
@@ -5763,11 +5878,12 @@ function setupSocketHandlers(io, db) {
 
         // Auto-assign the User role to all existing users
         const autoRoles = db.prepare('SELECT id FROM roles WHERE auto_assign = 1 AND scope = ?').all('server');
+        const mainServerId = getMainServer()?.id || null;
         for (const ar of autoRoles) {
           db.prepare(`
-            INSERT OR IGNORE INTO user_roles (user_id, role_id, channel_id, granted_by)
-            SELECT u.id, ?, NULL, NULL FROM users u
-          `).run(ar.id);
+            INSERT OR IGNORE INTO user_roles (user_id, role_id, server_id, channel_id, granted_by)
+            SELECT u.id, ?, ?, NULL, NULL FROM users u
+          `).run(ar.id, mainServerId);
         }
 
         for (const [code] of channelUsers) { emitOnlineUsers(code); }
@@ -5795,7 +5911,7 @@ function setupSocketHandlers(io, db) {
 
         // Get all channels the caller has access to (non-DM)
         const callerChannels = db.prepare(`
-          SELECT c.id, c.name, c.code, c.parent_channel_id, c.position
+          SELECT c.id, c.name, c.code, c.server_id, c.parent_channel_id, c.position
           FROM channels c
           JOIN channel_members cm ON c.id = cm.channel_id
           WHERE cm.user_id = ? AND c.is_dm = 0
@@ -5850,7 +5966,7 @@ function setupSocketHandlers(io, db) {
 
           // Get the user's current roles (all scopes)
           const currentRoles = db.prepare(`
-            SELECT ur.role_id, ur.channel_id, r.name, r.level, r.color
+            SELECT ur.role_id, ur.server_id, ur.channel_id, r.name, COALESCE(ur.custom_level, r.level) as level, r.color, r.scope
             FROM user_roles ur
             JOIN roles r ON ur.role_id = r.id
             WHERE ur.user_id = ?
@@ -5873,6 +5989,7 @@ function setupSocketHandlers(io, db) {
           id: c.id,
           name: c.name,
           code: c.code,
+          serverId: c.server_id,
           parentId: c.parent_channel_id,
           position: c.position
         }));
@@ -5933,6 +6050,14 @@ function setupSocketHandlers(io, db) {
       }
 
       const channelId = isInt(data.channelId) ? data.channelId : null;
+      const serverId = isInt(data.serverId) ? data.serverId : null;
+      if (channelId && serverId) return cb({ error: 'Choose either a server or channel scope, not both' });
+      if (serverId && !db.prepare('SELECT 1 FROM servers WHERE id = ?').get(serverId)) {
+        return cb({ error: 'Server not found' });
+      }
+      if (channelId && !db.prepare('SELECT 1 FROM channels WHERE id = ?').get(channelId)) {
+        return cb({ error: 'Channel not found' });
+      }
 
       // Custom level: allow caller to set a custom level (must be < caller's level)
       let assignLevel = role.level;
@@ -5954,18 +6079,29 @@ function setupSocketHandlers(io, db) {
         // assigning "User" server-wide removes "Jester" server-wide, etc.
         if (channelId) {
           db.prepare('DELETE FROM user_roles WHERE user_id = ? AND channel_id = ?').run(userId, channelId);
+        } else if (serverId) {
+          db.prepare('DELETE FROM user_roles WHERE user_id = ? AND channel_id IS NULL AND server_id = ?').run(userId, serverId);
         } else {
-          db.prepare('DELETE FROM user_roles WHERE user_id = ? AND channel_id IS NULL').run(userId);
+          db.prepare('DELETE FROM user_roles WHERE user_id = ? AND channel_id IS NULL AND server_id IS NULL').run(userId);
         }
-        db.prepare('INSERT INTO user_roles (user_id, role_id, channel_id, granted_by, custom_level) VALUES (?, ?, ?, ?, ?)').run(userId, roleId, channelId, socket.user.id, assignLevel !== role.level ? assignLevel : null);
+        db.prepare('INSERT INTO user_roles (user_id, role_id, server_id, channel_id, granted_by, custom_level) VALUES (?, ?, ?, ?, ?, ?)').run(
+          userId,
+          roleId,
+          serverId,
+          channelId,
+          socket.user.id,
+          assignLevel !== role.level ? assignLevel : null
+        );
 
         // Custom permissions: if provided, store per-user overrides
         if (data.customPerms && Array.isArray(data.customPerms)) {
           // Clear existing custom permission overrides for this user+role+scope
           if (channelId) {
             db.prepare('DELETE FROM user_role_perms WHERE user_id = ? AND role_id = ? AND channel_id = ?').run(userId, roleId, channelId);
+          } else if (serverId) {
+            db.prepare('DELETE FROM user_role_perms WHERE user_id = ? AND role_id = ? AND channel_id IS NULL AND server_id = ?').run(userId, roleId, serverId);
           } else {
-            db.prepare('DELETE FROM user_role_perms WHERE user_id = ? AND role_id = ? AND channel_id IS NULL').run(userId, roleId);
+            db.prepare('DELETE FROM user_role_perms WHERE user_id = ? AND role_id = ? AND channel_id IS NULL AND server_id IS NULL').run(userId, roleId);
           }
           // Only store overrides if they differ from the role's default permissions
           const rolePerms = db.prepare('SELECT permission FROM role_permissions WHERE role_id = ? AND allowed = 1').all(roleId).map(r => r.permission);
@@ -5973,12 +6109,12 @@ function setupSocketHandlers(io, db) {
           const added = customPerms.filter(p => !rolePerms.includes(p));
           const removed = rolePerms.filter(p => !customPerms.includes(p));
           if (added.length > 0 || removed.length > 0) {
-            const insertStmt = db.prepare('INSERT INTO user_role_perms (user_id, role_id, channel_id, permission, allowed) VALUES (?, ?, ?, ?, ?)');
+            const insertStmt = db.prepare('INSERT INTO user_role_perms (user_id, role_id, server_id, channel_id, permission, allowed) VALUES (?, ?, ?, ?, ?, ?)');
             for (const p of added) {
-              insertStmt.run(userId, roleId, channelId, p, 1);
+              insertStmt.run(userId, roleId, serverId, channelId, p, 1);
             }
             for (const p of removed) {
-              insertStmt.run(userId, roleId, channelId, p, 0);
+              insertStmt.run(userId, roleId, serverId, channelId, p, 0);
             }
           }
         }
@@ -6032,14 +6168,17 @@ function setupSocketHandlers(io, db) {
       }
 
       const channelId = isInt(data.channelId) ? data.channelId : null;
+      const serverId = isInt(data.serverId) ? data.serverId : null;
 
       // Apply role-linked channel access (revoke channels on demote) BEFORE removing the role
       applyRoleChannelAccess(roleId, userId, 'revoke');
 
       if (channelId) {
         db.prepare('DELETE FROM user_roles WHERE user_id = ? AND role_id = ? AND channel_id = ?').run(userId, roleId, channelId);
+      } else if (serverId) {
+        db.prepare('DELETE FROM user_roles WHERE user_id = ? AND role_id = ? AND channel_id IS NULL AND server_id = ?').run(userId, roleId, serverId);
       } else {
-        db.prepare('DELETE FROM user_roles WHERE user_id = ? AND role_id = ? AND channel_id IS NULL').run(userId, roleId);
+        db.prepare('DELETE FROM user_roles WHERE user_id = ? AND role_id = ? AND channel_id IS NULL AND server_id IS NULL').run(userId, roleId);
       }
 
       const target = db.prepare('SELECT COALESCE(display_name, username) as username FROM users WHERE id = ?').get(userId);
