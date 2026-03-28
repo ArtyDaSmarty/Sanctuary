@@ -1354,6 +1354,7 @@ _renderChannels() {
     const label = channelsToggle.querySelector('.section-label-text');
     if (label) label.textContent = showingDms ? 'Direct Messages' : 'Channels';
   }
+  const dmPane = document.getElementById('dm-pane');
   if (showingDms) {
     dmChannels.forEach(ch => {
       const el = document.createElement('div');
@@ -1371,10 +1372,10 @@ _renderChannels() {
       el.addEventListener('click', () => this.switchChannel(ch.code));
       list.appendChild(el);
     });
-    const dmPane = document.getElementById('dm-pane');
     if (dmPane) dmPane.style.display = 'none';
     return;
   }
+  if (dmPane) dmPane.style.display = 'none';
 
   // Sort sub-channels — respect parent's sort_alphabetical setting & per-tag overrides
   // sort_alphabetical: 0=manual, 1=alpha, 2=created, 3=oldest
@@ -1790,7 +1791,7 @@ _renderChannels() {
 
     // Show/hide DM pane
     const dmPane = document.getElementById('dm-pane');
-    if (dmPane) dmPane.style.display = dmChannels.length ? '' : 'none';
+    if (dmPane) dmPane.style.display = showingDms && dmChannels.length ? '' : 'none';
 
     // ── DM categorization (client-side localStorage) ──
     const dmAssignments = JSON.parse(localStorage.getItem('haven_dm_assignments') || '{}');
@@ -2069,17 +2070,19 @@ _fireNativeNotification(message, channelCode) {
 },
 
 _updateDmSectionBadge() {
-  const badge = document.getElementById('dm-unread-badge');
-  if (!badge) return;
   const dmChannels = (this.channels || []).filter(c => c.is_dm);
   const total = dmChannels.reduce((sum, ch) => sum + (this.unreadCounts[ch.code] || 0), 0);
-  if (total > 0) {
-    badge.textContent = total > 99 ? '99+' : total;
-    badge.style.display = '';
-  } else {
-    badge.textContent = '';
-    badge.style.display = 'none';
-  }
+  ['dm-server-badge', 'dm-section-badge', 'dm-unread-badge'].forEach((id) => {
+    const badge = document.getElementById(id);
+    if (!badge) return;
+    if (total > 0) {
+      badge.textContent = total > 99 ? '99+' : total;
+      badge.style.display = '';
+    } else {
+      badge.textContent = '';
+      badge.style.display = 'none';
+    }
+  });
 },
 
 _updateChannelVoiceIndicators() {
@@ -2143,10 +2146,11 @@ _getVisualChannelOrder() {
   document.querySelectorAll('#channel-list .channel-item:not([style*="display: none"])').forEach(el => {
     if (el.dataset.code) codes.push(el.dataset.code);
   });
-  // DM section
-  document.querySelectorAll('#dm-list .channel-item:not([style*="display: none"])').forEach(el => {
-    if (el.dataset.code) codes.push(el.dataset.code);
-  });
+  if (this.sidebarView === 'dms') {
+    document.querySelectorAll('#dm-list .channel-item:not([style*="display: none"])').forEach(el => {
+      if (el.dataset.code) codes.push(el.dataset.code);
+    });
+  }
   return codes;
 },
 
