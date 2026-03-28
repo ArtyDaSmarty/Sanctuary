@@ -18,9 +18,9 @@
   <div id="app">
     <div id="app-body">
 
-      <!-- ─── Server Bar (far left — like Discord) ─────── -->
+      <!-- ─── Server Bar (far left — sub-servers in this Haven instance) ─────── -->
       <nav class="server-bar" id="server-bar">
-        <div class="server-icon home active" id="home-server" title="This Server">
+        <div class="server-icon home active" id="home-server" title="Main">
           <span class="server-icon-text">⬡</span>
           <span class="server-status-dot online"></span>
         </div>
@@ -76,12 +76,12 @@
           <div class="sidebar-section" data-mod-id="join">
             <h5 class="section-label collapsible-section-toggle" id="join-section-toggle" style="cursor:pointer;user-select:none">
               <span class="collapse-toggle-arrow" id="join-section-arrow">▾</span>
-              <span class="section-label-text" style="flex:1">Join a Channel</span>
+              <span class="section-label-text" style="flex:1">Join a Server or Channel</span>
             </h5>
             <div class="collapsible-section-body" id="join-section-body">
               <div class="input-row">
                 <input type="text" id="channel-code-input"
-                       placeholder="Enter code..." maxlength="8" spellcheck="false">
+                       placeholder="Enter server or channel code..." maxlength="8" spellcheck="false">
                 <button id="join-channel-btn" class="btn-sm">Join</button>
               </div>
             </div>
@@ -891,12 +891,12 @@
   <div class="modal-overlay" id="add-server-modal" style="display:none">
     <div class="modal">
       <h3 id="add-server-modal-title">Add a Server</h3>
-      <p class="modal-desc">Connect to a friend's Haven server</p>
+      <p class="modal-desc" id="add-server-modal-desc">Create another server under this Haven instance</p>
       <div class="form-group">
         <label>Server Name</label>
-        <input type="text" id="add-server-name-input" placeholder='e.g. Jake&apos;s Haven' maxlength="30">
+        <input type="text" id="add-server-name-input" placeholder='e.g. Projects' maxlength="30">
       </div>
-      <div class="form-group">
+      <div class="form-group" id="server-url-group">
         <label>Server Address</label>
         <input type="text" id="server-url-input" placeholder="e.g. https://192.168.1.5:3000">
       </div>
@@ -904,7 +904,7 @@
         <label>Icon URL <span class="muted-text">(optional)</span></label>
         <input type="text" id="add-server-icon-input" placeholder="https://... or leave blank">
       </div>
-      <label class="eula-check-row" style="margin-bottom:12px;gap:8px">
+      <label class="eula-check-row" style="margin-bottom:12px;gap:8px" id="server-auto-icon-row">
         <input type="checkbox" id="server-auto-icon" checked>
         <span>Auto-pull icon from server</span>
       </label>
@@ -1487,7 +1487,7 @@
 
         <!-- Server Branding -->
         <div class="admin-settings" id="section-branding">
-          <h5 class="settings-section-subtitle">🏠 Server Branding</h5>
+          <h5 class="settings-section-subtitle">🏠 Haven Branding</h5>
           <label class="select-row">
             <span>Server Name</span>
             <input type="text" id="server-name-input" maxlength="32" class="settings-text-input" style="max-width:160px" placeholder="HAVEN">
@@ -1574,9 +1574,29 @@
             </div>
           </div>
         </div>
+        <div class="admin-settings" id="section-subserver" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
+          <h5 class="settings-section-subtitle">🧩 Selected Server</h5>
+          <small class="settings-hint" id="selected-server-settings-name">No server selected</small>
+          <label class="select-row" style="margin-top:8px">
+            <span>Server Name</span>
+            <input type="text" id="subserver-name-input" maxlength="30" class="settings-text-input" style="max-width:180px" placeholder="Server name">
+          </label>
+          <div class="server-icon-upload-area">
+            <div class="server-icon-preview" id="subserver-icon-preview">
+              <span class="server-icon-text">⬡</span>
+            </div>
+            <div class="server-icon-upload-controls">
+              <small class="settings-hint">Selected server icon (square, max 2 MB)</small>
+              <input type="file" id="subserver-icon-file" accept="image/*" style="font-size:11px;max-width:160px">
+              <div style="display:flex;gap:4px;margin-top:4px">
+                <button class="btn-sm btn-accent" id="subserver-icon-upload-btn">Upload</button>
+              </div>
+            </div>
+          </div>
+        </div>
         <div class="admin-settings" id="section-invite" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
-          <h5 class="settings-section-subtitle">🌐 Server Invite Code</h5>
-          <small class="settings-hint">A single code that adds people to every channel &amp; sub-channel on the server</small>
+          <h5 class="settings-section-subtitle">🌐 Selected Server Invite Code</h5>
+          <small class="settings-hint">Share this code so someone can enter the currently selected server</small>
           <div style="margin-top:8px;">
             <div id="server-code-display" style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
               <code id="server-code-value" style="font-family:monospace;font-size:1rem;letter-spacing:0.05em;opacity:0.7">—</code>
@@ -1605,6 +1625,11 @@
           </label>
           <small class="settings-hint">Trim oldest messages when DB exceeds N MB (0 = off)</small>
           <button class="btn-sm btn-full" id="run-cleanup-now-btn" style="margin-top:4px;">🧹 Run Cleanup Now</button>
+        </div>
+        <div class="admin-settings" id="section-session" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
+          <h5 class="settings-section-subtitle">🔐 Session</h5>
+          <small class="settings-hint">Log out before switching to another Haven instance.</small>
+          <button class="btn-sm btn-full" id="settings-logout-btn" style="margin-top:8px">Logout</button>
         </div>
         <div class="admin-settings" id="section-uploads" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
           <h5 class="settings-section-subtitle">📁 Uploads &amp; Limits</h5>
@@ -2225,7 +2250,7 @@
   <div class="modal-overlay" id="manage-servers-modal" style="display:none">
     <div class="modal" style="max-width:480px">
       <h3>⚙ Manage Servers</h3>
-      <p class="modal-desc">Edit or remove your linked servers</p>
+      <p class="modal-desc">Edit or remove servers inside this Haven instance</p>
       <div id="manage-servers-list" class="manage-servers-list"></div>
       <div class="modal-actions" style="justify-content:space-between">
         <button class="btn-sm btn-accent" id="manage-servers-add-btn">+ Add Server</button>
