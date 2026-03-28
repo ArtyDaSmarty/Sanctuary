@@ -131,14 +131,37 @@ function getSecureSetting(key, db = getDbSafe()) {
 function setSecureSetting(key, value, db = getDbSafe()) {
   if (!db || !SECURE_STORAGE_KEYS.includes(key)) return false;
   const normalized = String(value || '').trim();
-  if (!normalized) return false;
   ensureSecureSettingsMigrated(db);
+  if (!normalized) {
+    db.prepare('DELETE FROM secure_settings WHERE key = ?').run(key);
+    db.prepare('UPDATE server_settings SET value = ? WHERE key = ?').run('', key);
+    return true;
+  }
   db.prepare(`
     INSERT INTO secure_settings (key, value, updated_at)
     VALUES (?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
   `).run(key, encryptSecureValue(normalized));
   db.prepare('UPDATE server_settings SET value = ? WHERE key = ?').run('', key);
+  return true;
+}
+
+function clearStorageSettings(db = getDbSafe()) {
+  if (!db) return false;
+  ensureSecureSettingsMigrated(db);
+  const clearSetting = db.prepare('UPDATE server_settings SET value = ? WHERE key = ?');
+  for (const key of STORAGE_KEYS) {
+    if (SECURE_STORAGE_KEYS.includes(key)) {
+      db.prepare('DELETE FROM secure_settings WHERE key = ?').run(key);
+    }
+    clearSetting.run('', key);
+  }
+  clearSetting.run('local', 'storage_provider');
+  clearSetting.run('auto', 'storage_s3_region');
+  clearSetting.run('haven', 'storage_s3_prefix');
+  clearSetting.run('true', 'storage_s3_force_path_style');
+  s3CacheKey = null;
+  s3Client = null;
   return true;
 }
 
@@ -680,6 +703,7 @@ module.exports = {
   moveUploadToDeleted,
   readStorageSettings,
   restoreUploadsFromDirectory,
+  clearStorageSettings,
   setSecureSetting,
   stagePendingRestore,
   storeUploadBuffer,

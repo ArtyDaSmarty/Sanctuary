@@ -110,7 +110,7 @@ _setupUI() {
       const temporary = document.getElementById('new-channel-temporary')?.checked || false;
       const duration = parseInt(document.getElementById('new-channel-duration')?.value, 10) || 24;
       if (name) {
-        this.socket.emit('create-channel', { name, isPrivate, temporary, duration, channelType });
+        this.socket.emit('create-channel', { name, isPrivate, temporary, duration, channelType, serverId: this.currentServerId });
         nameInput.value = '';
         const typeSelect = document.getElementById('new-channel-type');
         if (typeSelect) typeSelect.value = 'standard';
@@ -1302,6 +1302,9 @@ _setupUI() {
     localStorage.removeItem('haven_user');
     window.location.href = '/';
   });
+  document.getElementById('settings-logout-btn')?.addEventListener('click', () => {
+    document.getElementById('logout-btn')?.click();
+  });
 
   // ── Games / Activities system ─────────────────────────────
   // Registry of available games — add new games here
@@ -2365,11 +2368,13 @@ _setupUI() {
 
   // ── Server invite code (immediate — not part of Save flow) ──
   document.getElementById('generate-server-code-btn')?.addEventListener('click', () => {
-    this.socket.emit('generate-server-code');
+    if (!this.currentServerId) return;
+    this.socket.emit('generate-server-code', { serverId: this.currentServerId });
   });
   document.getElementById('clear-server-code-btn')?.addEventListener('click', () => {
     if (!confirm('Clear the server invite code? Anyone with the old code won\'t be able to use it.')) return;
-    this.socket.emit('clear-server-code');
+    if (!this.currentServerId) return;
+    this.socket.emit('clear-server-code', { serverId: this.currentServerId });
   });
   document.getElementById('copy-server-code-btn')?.addEventListener('click', () => {
     const code = document.getElementById('server-code-value')?.textContent;
@@ -2387,6 +2392,31 @@ _setupUI() {
           onCopied();
         } catch { /* could not copy */ }
       });
+    }
+  });
+  document.getElementById('subserver-icon-upload-btn')?.addEventListener('click', async () => {
+    const fileInput = document.getElementById('subserver-icon-file');
+    if (!fileInput || !fileInput.files[0] || !this.currentServerId) return this._showToast('Select an image first', 'error');
+    const form = new FormData();
+    form.append('image', fileInput.files[0]);
+    form.append('serverId', String(this.currentServerId));
+    try {
+      const res = await fetch('/api/upload-subserver-icon', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${this.token}` },
+        body: form
+      });
+      const data = await res.json();
+      if (data.error) return this._showToast(data.error, 'error');
+      this.socket.emit('update-subserver', {
+        serverId: this.currentServerId,
+        name: document.getElementById('subserver-name-input')?.value?.trim() || this._getCurrentServerMeta()?.name || 'Server',
+        iconUrl: data.url
+      }, () => this.socket.emit('get-servers'));
+      this._showToast('Server icon updated', 'success');
+      fileInput.value = '';
+    } catch {
+      this._showToast('Upload failed', 'error');
     }
   });
 },
@@ -2583,6 +2613,8 @@ _editServer(url) {
 
 _openManageServersModal() {
   this._renderManageServersList();
+  const addBtn = document.getElementById('manage-servers-add-btn');
+  if (addBtn) addBtn.style.display = (this.user?.isAdmin || this._hasPerm('create_server')) ? '' : 'none';
   document.getElementById('manage-servers-modal').style.display = 'flex';
 },
 
@@ -3537,6 +3569,250 @@ async _uploadImage(file) {
     this.notifications.play('sent');
   } catch (err) {
     this._showToast(err.message || 'Upload failed', 'error');
+  }
+},
+
+_getCurrentServerMeta() {
+  return (this.servers || []).find(s => s.id === this.currentServerId) || this.servers?.[0] || null;
+},
+
+_selectServer(serverId) {
+  if (!serverId) return;
+  this.currentServerId = serverId;
+  const currentInServer = this.channels.find(c => c.code === this.currentChannel && !c.is_dm && c.server_id === serverId);
+  if (!currentInServer) {
+    const firstChannel = this.channels.find(c => !c.is_dm && c.server_id === serverId);
+    if (firstChannel) this.switchChannel(firstChannel.code);
+  }
+  this._renderServerBar();
+  this._renderChannels();
+  this._refreshSelectedServerSettings();
+},
+
+_openServerEditor(server = null) {
+  this._editingServerId = server?.id || null;
+  document.getElementById('add-server-modal-title').textContent = server ? 'Edit Server' : 'Add a Server';
+  const desc = document.getElementById('add-server-modal-desc');
+  if (desc) desc.textContent = server ? 'Edit a server under this Haven instance' : 'Create another server under this Haven instance';
+  document.getElementById('add-server-name-input').value = server?.name || '';
+  document.getElementById('add-server-icon-input').value = server?.icon_url || '';
+  const urlGroup = document.getElementById('server-url-group');
+  if (urlGroup) urlGroup.style.display = 'none';
+  const autoIcon = document.getElementById('server-auto-icon-row');
+  if (autoIcon) autoIcon.style.display = 'none';
+  document.getElementById('add-server-modal').style.display = 'flex';
+  document.getElementById('save-server-btn').textContent = server ? 'Save' : 'Add Server';
+  document.getElementById('add-server-name-input').focus();
+},
+
+_refreshSelectedServerSettings() {
+  const server = this._getCurrentServerMeta();
+  const nameInput = document.getElementById('subserver-name-input');
+  const preview = document.getElementById('subserver-icon-preview');
+  const codeValue = document.getElementById('server-code-value');
+  const label = document.getElementById('selected-server-settings-name');
+  if (label) label.textContent = server?.name || 'No server selected';
+  if (nameInput) nameInput.value = server?.name || '';
+  if (codeValue) codeValue.textContent = server?.code || '—';
+  if (preview) {
+    preview.innerHTML = server?.icon_url
+      ? `<img src="${server.icon_url}" alt="Server Icon">`
+      : '<span class="server-icon-text">□</span>';
+  }
+},
+
+_setupServerBar() {
+  this._renderServerBar();
+
+  document.getElementById('home-server')?.addEventListener('click', () => {
+    const main = (this.servers || []).find(s => s.name === 'Main') || this.servers?.[0];
+    if (main) this._selectServer(main.id);
+  });
+
+  const canCreateServer = !!(this.user?.isAdmin || this._hasPerm('create_server'));
+  const addBtn = document.getElementById('add-server-btn');
+  if (addBtn) {
+    addBtn.style.display = canCreateServer ? '' : 'none';
+    addBtn.onclick = () => this._openServerEditor();
+  }
+
+  document.getElementById('cancel-server-btn')?.addEventListener('click', () => {
+    document.getElementById('add-server-modal').style.display = 'none';
+    this._editingServerId = null;
+  });
+  document.getElementById('save-server-btn')?.addEventListener('click', () => this._addServer());
+  document.getElementById('add-server-modal')?.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
+  });
+  document.getElementById('manage-servers-btn')?.addEventListener('click', () => this._openManageServersModal());
+  document.getElementById('manage-servers-close-btn')?.addEventListener('click', () => {
+    document.getElementById('manage-servers-modal').style.display = 'none';
+  });
+  document.getElementById('manage-servers-add-btn')?.addEventListener('click', () => {
+    document.getElementById('manage-servers-modal').style.display = 'none';
+    this._openServerEditor();
+  });
+},
+
+_addServer() {
+  const name = document.getElementById('add-server-name-input').value.trim();
+  const iconUrl = document.getElementById('add-server-icon-input').value.trim();
+  if (!name) return this._showToast('Server name is required', 'error');
+
+  if (this._editingServerId) {
+    this.socket.emit('update-subserver', { serverId: this._editingServerId, name, iconUrl }, (res) => {
+      if (res?.error) return this._showToast(res.error, 'error');
+      this.socket.emit('get-servers');
+      document.getElementById('add-server-modal').style.display = 'none';
+      this._showToast('Server updated', 'success');
+      this._editingServerId = null;
+    });
+    return;
+  }
+
+  this.socket.emit('create-server', { name, iconUrl }, (res) => {
+    if (res?.error) return this._showToast(res.error, 'error');
+    document.getElementById('add-server-modal').style.display = 'none';
+    this.socket.emit('get-servers');
+    this.socket.emit('get-channels');
+    if (res?.serverId) this.currentServerId = res.serverId;
+    if (res?.defaultChannelCode) this.switchChannel(res.defaultChannelCode);
+    this._showToast(`Created "${name}"`, 'success');
+  });
+},
+
+_editServer(serverId) {
+  const server = (this.servers || []).find(s => s.id === serverId);
+  if (server) this._openServerEditor(server);
+},
+
+_openManageServersModal() {
+  this._renderManageServersList();
+  const addBtn = document.getElementById('manage-servers-add-btn');
+  if (addBtn) addBtn.style.display = (this.user?.isAdmin || this._hasPerm('create_server')) ? '' : 'none';
+  document.getElementById('manage-servers-modal').style.display = 'flex';
+},
+
+_renderManageServersList() {
+  const container = document.getElementById('manage-servers-list');
+  if (!container) return;
+  container.innerHTML = '';
+  (this.servers || []).forEach((s) => {
+    const row = document.createElement('div');
+    row.className = 'manage-server-row';
+    row.innerHTML = `
+      <div class="manage-server-icon">${s.icon_url ? `<img src="${this._escapeHtml(s.icon_url)}" alt="" class="manage-srv-icon-img">` : this._escapeHtml((s.name || '?')[0].toUpperCase())}</div>
+      <div class="manage-server-info">
+        <div class="manage-server-name">${this._escapeHtml(s.name)}</div>
+        <div class="manage-server-url">${this._escapeHtml(s.code || '')}</div>
+      </div>
+      <span class="manage-server-status online">${s.channel_count || 0} channels</span>
+      <div class="manage-server-actions">
+        <button class="manage-server-visit" title="Open server">↗</button>
+        <button class="manage-server-edit" title="Edit server">✏️</button>
+        ${s.name === 'Main' ? '' : '<button class="manage-server-delete danger-action" title="Delete server">🗑️</button>'}
+      </div>
+    `;
+    row.querySelector('.manage-server-visit')?.addEventListener('click', () => {
+      this._selectServer(s.id);
+      document.getElementById('manage-servers-modal').style.display = 'none';
+    });
+    row.querySelector('.manage-server-edit')?.addEventListener('click', () => {
+      document.getElementById('manage-servers-modal').style.display = 'none';
+      this._editServer(s.id);
+    });
+    row.querySelector('.manage-server-delete')?.addEventListener('click', () => {
+      if (!confirm(`Delete "${s.name}" and all of its channels?`)) return;
+      this.socket.emit('delete-server', { serverId: s.id }, (res) => {
+        if (res?.error) return this._showToast(res.error, 'error');
+        this.socket.emit('get-servers');
+        this.socket.emit('get-channels');
+        this._showToast(`Deleted "${s.name}"`, 'success');
+      });
+    });
+    container.appendChild(row);
+  });
+},
+
+_updateServerBadgeDots() {},
+
+_renderServerBar() {
+  const list = document.getElementById('server-list');
+  if (!list) return;
+  const canCreateServer = !!(this.user?.isAdmin || this._hasPerm('create_server'));
+  const addBtn = document.getElementById('add-server-btn');
+  if (addBtn) addBtn.style.display = canCreateServer ? '' : 'none';
+  const servers = (this.servers || []).filter(s => s.name !== 'Main');
+  const main = (this.servers || []).find(s => s.name === 'Main') || this.servers?.[0];
+  const home = document.getElementById('home-server');
+  if (home) {
+    home.classList.toggle('active', !!main && this.currentServerId === main.id);
+    home.title = main ? `${main.name}` : 'Main';
+    const text = home.querySelector('.server-icon-text');
+    if (text) text.textContent = main?.name?.charAt(0)?.toUpperCase() || 'M';
+  }
+
+  list.innerHTML = servers.map((s) => {
+    const active = this.currentServerId === s.id ? ' active' : '';
+    const initial = this._escapeHtml((s.name || '?')[0].toUpperCase());
+    return `<div class="server-icon remote${active}" data-server-id="${s.id}" title="${this._escapeHtml(s.name)}">
+      ${s.icon_url ? `<img src="${this._escapeHtml(s.icon_url)}" class="server-icon-img" alt=""><span class="server-icon-text" style="display:none">${initial}</span>` : `<span class="server-icon-text">${initial}</span>`}
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('.server-icon.remote').forEach((el) => {
+    el.addEventListener('click', () => this._selectServer(parseInt(el.dataset.serverId, 10)));
+  });
+  this._renderMobileSidebarServers();
+},
+
+_renderMobileServerList() {
+  const list = document.getElementById('mobile-server-list');
+  if (!list) return;
+  list.innerHTML = (this.servers || []).map((s) => `
+    <button class="mobile-server-item" data-server-id="${s.id}">
+      ${s.icon_url ? `<img src="${this._escapeHtml(s.icon_url)}" class="msrv-icon" alt="">` : `<span class="msrv-initial">${this._escapeHtml((s.name || '?')[0].toUpperCase())}</span>`}
+      <span>${this._escapeHtml(s.name)}</span>
+    </button>
+  `).join('');
+  list.querySelectorAll('[data-server-id]').forEach((el) => {
+    el.addEventListener('click', () => this._selectServer(parseInt(el.dataset.serverId, 10)));
+  });
+},
+
+_renderMobileSidebarServers() {
+  const scroll = document.getElementById('mobile-servers-scroll');
+  if (!scroll) return;
+  scroll.innerHTML = (this.servers || []).map((s) => `
+    <button class="mobile-srv-bubble${this.currentServerId === s.id ? ' active' : ''}" data-server-id="${s.id}" title="${this._escapeHtml(s.name)}">
+      ${s.icon_url ? `<img src="${this._escapeHtml(s.icon_url)}" alt="${this._escapeHtml(s.name)}" class="mobile-srv-icon-img">` : `<span>${this._escapeHtml((s.name || '?')[0].toUpperCase())}</span>`}
+    </button>
+  `).join('');
+  scroll.querySelectorAll('[data-server-id]').forEach((el) => {
+    el.addEventListener('click', () => this._selectServer(parseInt(el.dataset.serverId, 10)));
+  });
+},
+
+_setupMobileSidebarServers() {
+  const toggle = document.getElementById('mobile-servers-toggle');
+  const arrow = document.getElementById('mobile-servers-arrow');
+  const row = document.getElementById('mobile-servers-row');
+  if (toggle && row) {
+    const collapsed = localStorage.getItem('haven_mobile_servers_collapsed') === '1';
+    if (collapsed) {
+      arrow?.classList.add('collapsed');
+      row.classList.add('collapsed');
+    }
+    toggle.addEventListener('click', () => {
+      const isCollapsed = row.classList.toggle('collapsed');
+      arrow?.classList.toggle('collapsed', isCollapsed);
+      localStorage.setItem('haven_mobile_servers_collapsed', isCollapsed ? '1' : '0');
+    });
+  }
+  const mobileAdd = document.getElementById('mobile-srv-add-btn');
+  if (mobileAdd) {
+    mobileAdd.style.display = (this.user?.isAdmin || this._hasPerm('create_server')) ? '' : 'none';
+    mobileAdd.addEventListener('click', () => this._openServerEditor());
   }
 },
 

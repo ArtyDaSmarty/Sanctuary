@@ -75,6 +75,7 @@ _setupSocketListeners() {
     } else {
       document.getElementById('admin-mod-panel').style.display = (canModerate || this._hasPerm('manage_emojis') || this._hasPerm('manage_soundboard')) ? 'block' : 'none';
     }
+    if (typeof this._renderServerBar === 'function') this._renderServerBar();
   });
 
   // Roles updated (from admin assigning/revoking)
@@ -88,6 +89,7 @@ _setupSocketListeners() {
     const canCreateChannel = this.user.isAdmin || this._hasPerm('create_channel');
     document.getElementById('admin-controls').style.display = canCreateChannel ? 'block' : 'none';
     document.getElementById('admin-mod-panel').style.display = (canModerate || this._hasPerm('manage_emojis') || this._hasPerm('manage_soundboard')) ? 'block' : 'none';
+    if (typeof this._renderServerBar === 'function') this._renderServerBar();
     this._showToast('Your roles have been updated', 'info');
   });
 
@@ -100,6 +102,24 @@ _setupSocketListeners() {
     }
   });
 
+  this.socket.on('servers-list', (servers) => {
+    this.servers = Array.isArray(servers) ? servers : [];
+    if (!this.currentServerId || !this.servers.find(s => s.id === this.currentServerId)) {
+      this.currentServerId = this.servers[0]?.id || null;
+    }
+    if (typeof this._renderServerBar === 'function') this._renderServerBar();
+    if (typeof this._refreshSelectedServerSettings === 'function') this._refreshSelectedServerSettings();
+    if (typeof this._renderChannels === 'function') this._renderChannels();
+  });
+
+  this.socket.on('server-joined', (data) => {
+    if (!data) return;
+    if (data.serverId) this.currentServerId = data.serverId;
+    if (data.firstChannelCode) this.switchChannel(data.firstChannelCode);
+    this.socket.emit('get-servers');
+    this.socket.emit('get-channels');
+  });
+
   this.socket.on('connect', () => {
     this._setLed('connection-led', 'on');
     this._setLed('status-server-led', 'on');
@@ -108,6 +128,7 @@ _setupSocketListeners() {
     this._startPingMonitor();
     // Re-join channel after reconnect (server lost our room membership)
     this.socket.emit('visibility-change', { visible: !document.hidden });
+    this.socket.emit('get-servers');
     this.socket.emit('get-channels');
     this.socket.emit('get-server-settings');
     if (this.currentChannel) {
@@ -1077,6 +1098,9 @@ _setupSocketListeners() {
     if (prefs.theme) {
       // User has a saved personal theme preference — apply it
       applyThemeFromServer(prefs.theme);
+    } else if (localStorage.getItem('haven_theme')) {
+      // Preserve the user's locally chosen theme/effect combo if no saved server-side preference exists yet.
+      applyThemeFromServer(localStorage.getItem('haven_theme'));
     } else if (this.serverSettings.default_theme) {
       // No personal preference — apply the server's default theme
       applyThemeFromServer(this.serverSettings.default_theme);

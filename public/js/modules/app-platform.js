@@ -14,38 +14,7 @@ _markRead(messageId) {
 
 // ── Update Checker ─────────────────────────────────────
 async _checkForUpdates() {
-  try {
-    // Get local version from the server
-    const localRes = await fetch('/api/version');
-    if (!localRes.ok) return;
-    const { version: localVersion } = await localRes.json();
-
-    // Check GitHub for latest release
-    const ghRes = await fetch('https://api.github.com/repos/ancsemi/Haven/releases/latest', {
-      headers: { Accept: 'application/vnd.github.v3+json' }
-    });
-    if (!ghRes.ok) return;
-    const release = await ghRes.json();
-
-    const remoteVersion = (release.tag_name || '').replace(/^v/, '');
-    if (!remoteVersion || !localVersion) return;
-
-    if (this._isNewerVersion(remoteVersion, localVersion)) {
-      // Cache the update info so visibility can be toggled without re-fetching
-      const zipAsset = (release.assets || []).find(a => a.name && a.name.endsWith('.zip'));
-      this._pendingUpdate = {
-        text: `Update v${remoteVersion}`,
-        title: `Haven v${remoteVersion} is available (you have v${localVersion}). Click to view.`,
-        href: zipAsset ? zipAsset.browser_download_url : release.html_url
-      };
-      this._applyUpdateBanner();
-    }
-  } catch (e) {
-    // Silently fail — update check is non-critical
-  }
-
-  // Re-check every 30 minutes
-  setTimeout(() => this._checkForUpdates(), 30 * 60 * 1000);
+  this._pendingUpdate = null;
 },
 
 /**
@@ -54,20 +23,7 @@ async _checkForUpdates() {
  */
 _applyUpdateBanner() {
   const banner = document.getElementById('update-banner');
-  if (!banner) return;
-  if (!this._pendingUpdate) return; // no update detected yet
-
-  const adminOnly = this.serverSettings?.update_banner_admin_only === 'true';
-  const canSee = !adminOnly || this.user?.isAdmin;
-
-  if (canSee) {
-    banner.style.display = 'inline-flex';
-    banner.querySelector('.update-text').textContent = this._pendingUpdate.text;
-    banner.title = this._pendingUpdate.title;
-    banner.href = this._pendingUpdate.href;
-  } else {
-    banner.style.display = 'none';
-  }
+  if (banner) banner.style.display = 'none';
 },
 
 /**

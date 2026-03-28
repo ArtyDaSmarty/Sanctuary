@@ -9,6 +9,7 @@ const {
   addDirectoryToZip,
   appendActiveUploadsToZip,
   applyPendingRestoreIfPresent,
+  clearStorageSettings,
   cleanupActiveUploads,
   deleteUploadByName,
   generateStoredFilename,
@@ -632,11 +633,19 @@ function getAdminFromRequest(req) {
 function buildStorageStatusPayload() {
   const config = getStorageConfig();
   const pendingRestore = getPendingRestoreInfo();
+  const configured = config.provider === 's3'
+    && !!config.s3.endpoint
+    && !!config.s3.bucket
+    && !!config.s3.accessKeyId
+    && !!config.s3.secretAccessKey;
   return {
     provider: config.provider,
+    configured,
     bucket: config.s3.bucket,
     endpoint: config.s3.endpoint,
+    region: config.s3.region,
     prefix: config.s3.prefix,
+    forcePathStyle: !!config.s3.forcePathStyle,
     pendingRestore: pendingRestore.pending
   };
 }
@@ -644,6 +653,54 @@ function buildStorageStatusPayload() {
 app.get('/api/admin/storage/status', (req, res) => {
   if (!getAdminFromRequest(req)) return res.status(403).json({ error: 'Admin only' });
   res.json(buildStorageStatusPayload());
+});
+
+app.post('/api/admin/storage/configure', express.json(), async (req, res) => {
+  if (!getAdminFromRequest(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    const body = req.body || {};
+    const provider = body.provider === 's3' ? 's3' : 'local';
+
+    if (provider === 'local') {
+      clearStorageSettings();
+      return res.json({ ok: true, ...buildStorageStatusPayload() });
+    }
+
+    const payload = {
+      endpoint: String(body.endpoint || '').trim(),
+      region: String(body.region || 'auto').trim() || 'auto',
+      bucket: String(body.bucket || '').trim(),
+      accessKeyId: String(body.accessKeyId || '').trim(),
+      secretAccessKey: String(body.secretAccessKey || '').trim(),
+      prefix: String(body.prefix || 'haven').trim(),
+      forcePathStyle: body.forcePathStyle !== false
+    };
+    await testS3Connection(payload);
+
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_provider', 's3');
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_s3_endpoint', payload.endpoint);
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_s3_region', payload.region);
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_s3_bucket', payload.bucket);
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_s3_prefix', payload.prefix || 'haven');
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_s3_force_path_style', payload.forcePathStyle ? 'true' : 'false');
+    const { setSecureSetting } = require('./src/storage');
+    setSecureSetting('storage_s3_access_key', payload.accessKeyId);
+    setSecureSetting('storage_s3_secret_key', payload.secretAccessKey);
+
+    res.json({ ok: true, ...buildStorageStatusPayload() });
+  } catch (err) {
+    res.status(400).json({ error: err?.message || 'Failed to save storage settings' });
+  }
+});
+
+app.post('/api/admin/storage/disconnect', express.json(), (req, res) => {
+  if (!getAdminFromRequest(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    clearStorageSettings();
+    res.json({ ok: true, ...buildStorageStatusPayload() });
+  } catch (err) {
+    res.status(500).json({ error: err?.message || 'Disconnect failed' });
+  }
 });
 
 app.post('/api/admin/storage/test', express.json(), async (req, res) => {
@@ -1323,6 +1380,42 @@ app.post('/api/upload-server-icon', uploadLimiter, (req, res) => {
       res.json({ url: saved.url });
     })().catch((uploadErr) => {
       console.error('Server icon upload error:', uploadErr);
+      res.status(500).json({ error: 'Failed to save server icon' });
+    });
+  });
+});
+
+app.post('/api/upload-subserver-icon', uploadLimiter, (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  const user = token ? verifyToken(token) : null;
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  if (!verifyAdminFromDb(user) && !userHasPermission(user.id, 'manage_server')) {
+    return res.status(403).json({ error: 'Requires admin or Manage Server permission' });
+  }
+
+  upload.single('image')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    if (req.file.size > 2 * 1024 * 1024) {
+      return res.status(400).json({ error: 'Server icon must be under 2 MB' });
+    }
+    if (!validateImageMagic(req.file)) return res.status(400).json({ error: 'Failed to validate' });
+    const safeExt = getValidatedImageExtension(req.file.mimetype);
+    if (!safeExt) return res.status(400).json({ error: 'Invalid image' });
+
+    const serverId = parseInt(req.body?.serverId, 10);
+    if (!serverId) return res.status(400).json({ error: 'Missing serverId' });
+
+    (async () => {
+      const saved = await persistUploadedFile(req.file, { forcedExt: safeExt, cacheControl: 'public, max-age=604800, immutable' });
+      const { getDb } = require('./src/database');
+      const db = getDb();
+      const server = db.prepare('SELECT id FROM servers WHERE id = ?').get(serverId);
+      if (!server) return res.status(404).json({ error: 'Server not found' });
+      db.prepare('UPDATE servers SET icon_url = ? WHERE id = ?').run(saved.url, serverId);
+      res.json({ url: saved.url });
+    })().catch((uploadErr) => {
+      console.error('Sub-server icon upload error:', uploadErr);
       res.status(500).json({ error: 'Failed to save server icon' });
     });
   });

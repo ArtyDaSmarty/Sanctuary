@@ -1543,28 +1543,26 @@ function initThemeSwitcher(containerId, socket) {
 
 function applyThemeFromServer(theme) {
   if (!theme) return;
+  const customEditor = document.getElementById('custom-theme-editor');
+  const rgbEditor = document.getElementById('rgb-theme-editor');
+
   document.documentElement.setAttribute('data-theme', theme);
   localStorage.setItem('haven_theme', theme);
   document.querySelectorAll('.theme-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.theme === theme);
   });
   stopRgbCycle();
+  clearCustomVars();
+  if (customEditor && customEditor._hide) customEditor._hide();
+  if (rgbEditor && rgbEditor._hide) rgbEditor._hide();
+
   if (theme === 'custom') {
     const hsv = JSON.parse(localStorage.getItem('haven_custom_hsv') || 'null');
     if (hsv) applyCustomVars(generateCustomPalette(hsv.h, hsv.s, hsv.v, hsv.s));
-    const editor = document.getElementById('custom-theme-editor');
-    if (editor && editor._show) editor._show();
+    if (customEditor && customEditor._show) customEditor._show();
   } else if (theme === 'rgb') {
-    clearCustomVars();
     startRgbCycle();
-    const editor = document.getElementById('rgb-theme-editor');
-    if (editor && editor._show) editor._show();
-  } else {
-    clearCustomVars();
-    const customEditor = document.getElementById('custom-theme-editor');
-    if (customEditor && customEditor._hide) customEditor._hide();
-    const rgbEditor = document.getElementById('rgb-theme-editor');
-    if (rgbEditor && rgbEditor._hide) rgbEditor._hide();
+    if (rgbEditor && rgbEditor._show) rgbEditor._show();
   }
   // Re-apply effects for new theme
   const fxMode = _getStoredEffectMode();

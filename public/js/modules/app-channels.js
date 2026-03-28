@@ -1317,8 +1317,24 @@ _renderChannels() {
   const list = document.getElementById('channel-list');
   list.innerHTML = '';
 
-  const regularChannels = this.channels.filter(c => !c.is_dm);
+  if (!this.currentServerId && this.servers?.length) {
+    this.currentServerId = this.servers[0].id;
+  }
+
+  const regularChannels = this.channels.filter(c => !c.is_dm && c.server_id === this.currentServerId);
   const dmChannels = this.channels.filter(c => c.is_dm);
+
+  if (this.currentChannel) {
+    const current = this.channels.find(c => c.code === this.currentChannel);
+    if (current && !current.is_dm && current.server_id !== this.currentServerId) {
+      const fallback = regularChannels[0];
+      if (fallback) {
+        this.currentChannel = fallback.code;
+      } else {
+        this.currentChannel = null;
+      }
+    }
+  }
 
   // Build parent → sub-channel tree
   const parentChannels = regularChannels.filter(c => !c.parent_channel_id);

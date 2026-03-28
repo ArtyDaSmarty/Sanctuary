@@ -5,8 +5,9 @@ const ALL_PERMS = [
   'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
   'create_channel', 'create_forum_posts', 'upload_files', 'use_voice', 'use_tts', 'manage_webhooks', 'mention_everyone', 'view_history',
   'view_all_members', 'manage_emojis', 'manage_soundboard', 'manage_music_queue', 'promote_user', 'transfer_admin',
-  'manage_roles', 'manage_server', 'delete_channel'
+  'manage_roles', 'manage_server', 'create_server', 'delete_channel'
 ];
+
 //Similarly flavored solution to perm labels
 const PERM_LABELS = {
   edit_own_messages: 'Edit Own Messages', delete_own_messages: 'Delete Own Messages',
@@ -26,7 +27,7 @@ const PERM_LABELS = {
   manage_soundboard: 'Manage Soundboard',
   manage_music_queue: 'Manage Music Queue',
   promote_user: 'Promote Users', transfer_admin: 'Transfer Admin',
-  manage_roles: 'Manage Roles', manage_server: 'Manage Server', delete_channel: 'Delete Channels'
+  manage_roles: 'Manage Roles', manage_server: 'Manage Server', create_server: 'Create Servers', delete_channel: 'Delete Channels'
 };
 
 export default {
@@ -342,10 +343,6 @@ _applyServerSettings() {
       whitelistToggle.checked = this.serverSettings.whitelist_enabled === 'true';
     }
 
-    const updateBannerAdminOnly = document.getElementById('update-banner-admin-only');
-    if (updateBannerAdminOnly) {
-      updateBannerAdminOnly.checked = this.serverSettings.update_banner_admin_only === 'true';
-    }
     const defaultTheme = document.getElementById('default-theme-select');
     if (defaultTheme) {
       defaultTheme.value = this.serverSettings.default_theme || '';
@@ -371,9 +368,7 @@ _applyServerSettings() {
 
   // Always update visual branding regardless of modal state
   this._applyServerBranding();
-
-  // Re-evaluate update banner visibility whenever settings change
-  this._applyUpdateBanner();
+  if (typeof this._refreshSelectedServerSettings === 'function') this._refreshSelectedServerSettings();
 
   // Re-render channels in case sort mode changed
   if (!localStorage.getItem('haven_server_sort_mode')) this._renderChannels();
@@ -443,8 +438,8 @@ _snapshotAdminSettings() {
     max_emoji_kb: this.serverSettings.max_emoji_kb || '256',
     max_proxy_avatar_kb: this.serverSettings.max_proxy_avatar_kb || '256',
     max_poll_options: this.serverSettings.max_poll_options || '10',
-    update_banner_admin_only: this.serverSettings.update_banner_admin_only || 'false',
-    default_theme: this.serverSettings.default_theme || ''
+    default_theme: this.serverSettings.default_theme || '',
+    subserver_name: this._getCurrentServerMeta?.()?.name || ''
   };
   // Load webhooks list for admin preview
   if (this.user?.isAdmin) {
@@ -533,15 +528,22 @@ _saveAdminSettings() {
     changed = true;
   }
 
-  const updateBannerAdminOnly = document.getElementById('update-banner-admin-only')?.checked ? 'true' : 'false';
-  if (updateBannerAdminOnly !== (snap.update_banner_admin_only || 'false')) {
-    this.socket.emit('update-server-setting', { key: 'update_banner_admin_only', value: updateBannerAdminOnly });
-    changed = true;
-  }
-
   const defaultTheme = document.getElementById('default-theme-select')?.value || '';
   if (defaultTheme !== (snap.default_theme || '')) {
     this.socket.emit('update-server-setting', { key: 'default_theme', value: defaultTheme });
+    changed = true;
+  }
+
+  const selectedServer = this._getCurrentServerMeta?.();
+  const subserverName = document.getElementById('subserver-name-input')?.value.trim() || '';
+  if (selectedServer?.id && subserverName && subserverName !== (snap.subserver_name || '')) {
+    this.socket.emit('update-subserver', {
+      serverId: selectedServer.id,
+      name: subserverName,
+      iconUrl: selectedServer.icon_url || ''
+    }, (res) => {
+      if (!res?.error) this.socket.emit('get-servers');
+    });
     changed = true;
   }
 
@@ -580,10 +582,10 @@ _cancelAdminSettings() {
     if (mpak) mpak.value = snap.max_proxy_avatar_kb || '256';
     const mpo = document.getElementById('max-poll-options');
     if (mpo) mpo.value = snap.max_poll_options || '10';
-    const uba = document.getElementById('update-banner-admin-only');
-    if (uba) uba.checked = snap.update_banner_admin_only === 'true';
     const dt = document.getElementById('default-theme-select');
     if (dt) dt.value = snap.default_theme || '';
+    const ssn = document.getElementById('subserver-name-input');
+    if (ssn) ssn.value = snap.subserver_name || '';
   }
   document.getElementById('settings-modal').style.display = 'none';
 },
@@ -2314,8 +2316,15 @@ _initRoleManagement() {
     const userId = document.getElementById('assign-role-modal').dataset.userId;
     const scope = document.getElementById('assign-role-scope').value;
     if (!roleId || !userId) return;
-    const channelId = scope !== 'server' ? parseInt(scope, 10) : null;
-    this.socket.emit('assign-role', { userId: parseInt(userId, 10), roleId: parseInt(roleId, 10), channelId }, (res) => {
+    const selectedServer = this._getCurrentServerMeta?.();
+    const channelId = scope.startsWith('channel:') ? parseInt(scope.slice(8), 10) : null;
+    const serverId = scope === 'subserver' ? selectedServer?.id || null : null;
+    this.socket.emit('assign-role', {
+      userId: parseInt(userId, 10),
+      roleId: parseInt(roleId, 10),
+      channelId,
+      serverId
+    }, (res) => {
       if (res.error) { this._showToast(res.error, 'error'); return; }
       this._showToast('Role assigned', 'success');
       document.getElementById('assign-role-modal').style.display = 'none';
@@ -2661,7 +2670,7 @@ _renderChannelRolesMembers() {
     const badges = m.isAdmin
       ? '<span class="channel-roles-badge badge-admin"><span class="badge-dot" style="background:#e74c3c"></span>Admin</span>'
       : (m.roles || []).map(r =>
-          `<span class="channel-roles-badge"><span class="badge-dot" style="background:${this._safeColor(r.color, '#aaa')}"></span>${this._escapeHtml(r.name)}<span class="badge-scope">${r.scope === 'channel' ? '📌 Channel' : '🌐 Server'}</span><span class="revoke-btn" data-uid="${m.id}" data-rid="${r.roleId}" data-scope="${r.scope}" title="Revoke">✕</span></span>`
+          `<span class="channel-roles-badge"><span class="badge-dot" style="background:${this._safeColor(r.color, '#aaa')}"></span>${this._escapeHtml(r.name)}<span class="badge-scope">${r.scope === 'channel' ? '📌 Channel' : (r.scope === 'subserver' ? '🗂️ Server' : '🌐 Big Server')}</span><span class="revoke-btn" data-uid="${m.id}" data-rid="${r.roleId}" data-scope="${r.scope}" title="Revoke">✕</span></span>`
         ).join('') || '<span class="channel-roles-no-role">No roles</span>';
 
     return `<div class="channel-roles-member${sel}" data-uid="${m.id}">
@@ -2693,7 +2702,8 @@ _renderChannelRolesMembers() {
       const rid = parseInt(btn.dataset.rid);
       const scope = btn.dataset.scope;
       const channelId = scope === 'channel' ? this._channelRolesChannelId : null;
-      this.socket.emit('revoke-role', { userId: uid, roleId: rid, channelId });
+      const serverId = scope === 'subserver' ? this.currentServerId : null;
+      this.socket.emit('revoke-role', { userId: uid, roleId: rid, channelId, serverId });
       this._showToast('Role revoked', 'success');
       // Refresh after a short delay
       setTimeout(() => this._refreshChannelRoles(), 400);
@@ -2725,7 +2735,7 @@ _showChannelRolesActions(userId) {
     currentDiv.innerHTML = '<span class="channel-roles-badge badge-admin"><span class="badge-dot" style="background:#e74c3c"></span>Admin</span>';
   } else if (member.roles.length) {
     currentDiv.innerHTML = member.roles.map(r =>
-      `<span class="channel-roles-badge"><span class="badge-dot" style="background:${this._safeColor(r.color, '#aaa')}"></span>${this._escapeHtml(r.name)} <span class="badge-scope">${r.scope === 'channel' ? '📌 Channel' : '🌐 Server'}</span></span>`
+      `<span class="channel-roles-badge"><span class="badge-dot" style="background:${this._safeColor(r.color, '#aaa')}"></span>${this._escapeHtml(r.name)} <span class="badge-scope">${r.scope === 'channel' ? '📌 Channel' : (r.scope === 'subserver' ? '🗂️ Server' : '🌐 Big Server')}</span></span>`
     ).join('');
   } else {
     currentDiv.innerHTML = '<span style="font-size:0.78rem;color:var(--text-muted)">No roles assigned</span>';
@@ -2741,8 +2751,9 @@ _assignChannelRole() {
 
   const scopeVal = document.getElementById('channel-roles-scope-select').value;
   const channelId = scopeVal === 'channel' ? this._channelRolesChannelId : null;
+  const serverId = scopeVal === 'subserver' ? this.currentServerId : null;
 
-  this.socket.emit('assign-role', { userId, roleId, channelId }, (res) => {
+  this.socket.emit('assign-role', { userId, roleId, channelId, serverId }, (res) => {
     if (res.error) return this._showToast(res.error, 'error');
     this._showToast('Role assigned', 'success');
     // Reset selection
@@ -2916,7 +2927,7 @@ _openAssignRoleModal(userId, username) {
 
   // Populate scope with structured parent → sub-channel grouping
   const scopeSel = document.getElementById('assign-role-scope');
-  const nonDm = this.channels.filter(c => !c.is_dm);
+  const nonDm = this.channels.filter(c => !c.is_dm && (!this.currentServerId || c.server_id === this.currentServerId));
   const parents = nonDm.filter(c => !c.parent_channel_id);
   const subMap = {};
   nonDm.filter(c => c.parent_channel_id).forEach(c => {
@@ -2924,12 +2935,16 @@ _openAssignRoleModal(userId, username) {
     subMap[c.parent_channel_id].push(c);
   });
 
-  let scopeHtml = '<option value="server">🌐 Server-wide</option>';
+  let scopeHtml = '<option value="instance">🌐 Big Server-wide</option>';
+  if (this.currentServerId) {
+    const currentServer = (this.servers || []).find(s => s.id === this.currentServerId);
+    scopeHtml += `<option value="subserver">🗂️ ${this._escapeHtml(currentServer?.name || 'This Server')}</option>`;
+  }
   parents.forEach(p => {
-    scopeHtml += `<option value="${p.id}"># ${this._escapeHtml(p.name)}</option>`;
+    scopeHtml += `<option value="channel:${p.id}"># ${this._escapeHtml(p.name)}</option>`;
     const subs = subMap[p.id] || [];
     subs.forEach(s => {
-      scopeHtml += `<option value="${s.id}">&nbsp;&nbsp;└ ${this._escapeHtml(s.name)}</option>`;
+      scopeHtml += `<option value="channel:${s.id}">&nbsp;&nbsp;└ ${this._escapeHtml(s.name)}</option>`;
     });
   });
   scopeSel.innerHTML = scopeHtml;
@@ -2995,7 +3010,7 @@ _renderRacUsers(filter = '') {
       : initial;
     const activeClass = this._racSelectedUser === u.id ? ' active' : '';
     const roleNames = u.currentRoles
-      .filter(r => !r.channel_id) // server-wide only for summary
+      .filter(r => !r.channel_id && !r.server_id) // big-server-wide only for summary
       .map(r => r.name).join(', ') || 'No role';
     return `<div class="rac-user-item${activeClass}" data-uid="${u.id}">
       <div class="rac-user-avatar" style="background-color:${color};${shapeStyle}">${avatarInner}</div>
@@ -3033,27 +3048,44 @@ _renderRacChannels() {
 
   // Get current role per scope for this user
   const getRoleName = (channelId) => {
-    const key = `${userId}:${channelId || 'server'}`;
+    const scopeKey = channelId === null ? 'instance' : (typeof channelId === 'string' ? channelId : `channel:${channelId}`);
+    const key = `${userId}:${scopeKey}`;
     if (this._racPendingChanges[key]) {
       const pc = this._racPendingChanges[key];
       if (pc.action === 'revoke') return 'None ✎';
       const pendingRole = this._racData.roles.find(r => r.id === pc.roleId);
       return pendingRole ? `${pendingRole.name} ✎` : '';
     }
-    const match = user.currentRoles.filter(r => channelId ? r.channel_id === channelId : !r.channel_id);
+    const match = user.currentRoles.filter(r => {
+      if (channelId === null) return !r.channel_id && !r.server_id;
+      if (typeof channelId === 'string' && channelId.startsWith('server:')) return !r.channel_id && r.server_id === parseInt(channelId.slice(7), 10);
+      return r.channel_id === channelId;
+    });
     return match.map(r => r.name).join(', ') || '';
   };
 
   let html = '';
 
-  // Admin: server-wide option
+  // Big-server-wide option
   if (this._racData.callerIsAdmin) {
-    const serverActive = this._racSelectedChannel === 'server' ? ' active' : '';
+    const serverActive = this._racSelectedChannel === 'instance' ? ' active' : '';
     const serverRole = getRoleName(null);
-    html += `<div class="rac-channel-item rac-server-wide${serverActive}" data-channel="server">
+    html += `<div class="rac-channel-item rac-server-wide${serverActive}" data-channel="instance">
       <span class="rac-channel-icon">🌐</span>
-      <span>Server-wide</span>
+      <span>Big Server-wide</span>
       ${serverRole ? `<span class="rac-channel-current-role">${this._escapeHtml(serverRole)}</span>` : ''}
+    </div>`;
+  }
+
+  if (this.currentServerId) {
+    const currentServer = (this.servers || []).find(s => s.id === this.currentServerId);
+    const currentServerKey = `server:${this.currentServerId}`;
+    const subserverActive = this._racSelectedChannel === currentServerKey ? ' active' : '';
+    const subserverRole = getRoleName(currentServerKey);
+    html += `<div class="rac-channel-item${subserverActive}" data-channel="${currentServerKey}">
+      <span class="rac-channel-icon">🗂️</span>
+      <span>${this._escapeHtml(currentServer?.name || 'This Server')}</span>
+      ${subserverRole ? `<span class="rac-channel-current-role">${this._escapeHtml(subserverRole)}</span>` : ''}
     </div>`;
   }
 
@@ -3097,15 +3129,15 @@ _renderRacChannels() {
     el.addEventListener('click', () => {
       const ch = el.dataset.channel;
       const prevChannel = this._racSelectedChannel;
-      this._racSelectedChannel = ch === 'server' ? 'server' : parseInt(ch);
+      this._racSelectedChannel = ch === 'instance' || ch.startsWith('server:') ? ch : parseInt(ch, 10);
 
       // Carry forward pending modifications to the new channel so the user
       // doesn't have to re-configure the same role/permissions from scratch
       if (this._racSelectedUser && prevChannel != null && prevChannel !== this._racSelectedChannel) {
-        const prevChId = prevChannel === 'server' ? null : prevChannel;
-        const newChId  = this._racSelectedChannel === 'server' ? null : this._racSelectedChannel;
-        const prevKey  = `${this._racSelectedUser}:${prevChId || 'server'}`;
-        const newKey   = `${this._racSelectedUser}:${newChId || 'server'}`;
+        const prevScope = prevChannel === 'instance' ? 'instance' : (typeof prevChannel === 'string' ? prevChannel : `channel:${prevChannel}`);
+        const newScope  = this._racSelectedChannel === 'instance' ? 'instance' : (typeof this._racSelectedChannel === 'string' ? this._racSelectedChannel : `channel:${this._racSelectedChannel}`);
+        const prevKey  = `${this._racSelectedUser}:${prevScope}`;
+        const newKey   = `${this._racSelectedUser}:${newScope}`;
         const prevPending = this._racPendingChanges[prevKey];
         if (prevPending && !this._racPendingChanges[newKey]) {
           // Clone the previous config as a starting point for the new channel
@@ -3134,12 +3166,18 @@ _renderRacConfig() {
   const user = this._racData.users.find(u => u.id === userId);
   if (!user) return;
 
-  const channelId = this._racSelectedChannel === 'server' ? null : this._racSelectedChannel;
-  const key = `${userId}:${channelId || 'server'}`;
+  const channelId = typeof this._racSelectedChannel === 'number' ? this._racSelectedChannel : null;
+  const serverId = typeof this._racSelectedChannel === 'string' && this._racSelectedChannel.startsWith('server:')
+    ? parseInt(this._racSelectedChannel.slice(7), 10)
+    : null;
+  const scopeKey = this._racSelectedChannel === 'instance'
+    ? 'instance'
+    : (serverId ? `server:${serverId}` : `channel:${channelId}`);
+  const key = `${userId}:${scopeKey}`;
 
   // Current assignment (from server data)
   const currentRoles = user.currentRoles.filter(r =>
-    channelId ? r.channel_id === channelId : !r.channel_id
+    channelId ? r.channel_id === channelId : (serverId ? (!r.channel_id && r.server_id === serverId) : (!r.channel_id && !r.server_id))
   );
   const currentRole = currentRoles.length > 0 ? currentRoles[0] : null;
 
@@ -3177,7 +3215,7 @@ _renderRacConfig() {
   const callerIsAdmin = this._racData.callerIsAdmin;
   const allPerms = ALL_PERMS;
   // Perms that only admin can grant
-  const adminOnlyPerms = ['transfer_admin', 'manage_roles', 'manage_server', 'delete_channel'];
+  const adminOnlyPerms = ['transfer_admin', 'manage_roles', 'manage_server', 'create_server', 'delete_channel'];
   // Perms that require the caller to have them to be able to grant
   const permLabels = PERM_LABELS;
 
@@ -3349,8 +3387,14 @@ _renderRacConfig() {
 
 _racUpdatePending(forceRoleId) {
   const userId = this._racSelectedUser;
-  const channelId = this._racSelectedChannel === 'server' ? null : this._racSelectedChannel;
-  const key = `${userId}:${channelId || 'server'}`;
+  const channelId = typeof this._racSelectedChannel === 'number' ? this._racSelectedChannel : null;
+  const serverId = typeof this._racSelectedChannel === 'string' && this._racSelectedChannel.startsWith('server:')
+    ? parseInt(this._racSelectedChannel.slice(7), 10)
+    : null;
+  const scopeKey = this._racSelectedChannel === 'instance'
+    ? 'instance'
+    : (serverId ? `server:${serverId}` : `channel:${channelId}`);
+  const key = `${userId}:${scopeKey}`;
 
   const roleId = forceRoleId !== undefined
     ? forceRoleId
@@ -3360,7 +3404,7 @@ _racUpdatePending(forceRoleId) {
     // Check if user currently HAS a role at this scope — if so, queue a revocation
     const user = this._racData.users.find(u => u.id === userId);
     const currentRoles = user ? user.currentRoles.filter(r =>
-      channelId ? r.channel_id === channelId : !r.channel_id
+      channelId ? r.channel_id === channelId : (serverId ? (!r.channel_id && r.server_id === serverId) : (!r.channel_id && !r.server_id))
     ) : [];
     if (currentRoles.length > 0) {
       this._racPendingChanges[key] = {
@@ -3397,12 +3441,13 @@ _racSaveChanges() {
   for (const [key, val] of changes) {
     expandedChanges.push([key, val]);
     if (val.applyToSubs && val.action === 'assign') {
-      const [userIdStr, scope] = key.split(':');
-      const channelId = scope === 'server' ? null : parseInt(scope);
+      const userIdStr = key.split(':', 1)[0];
+      const normalizedScope = key.slice(String(userIdStr).length + 1);
+      const channelId = normalizedScope.startsWith('channel:') ? parseInt(normalizedScope.slice(8), 10) : null;
       if (channelId && this._racData) {
         const subs = this._racData.channels.filter(c => c.parentId === channelId);
         for (const sub of subs) {
-          const subKey = `${userIdStr}:${sub.id}`;
+          const subKey = `${userIdStr}:channel:${sub.id}`;
           if (!this._racPendingChanges[subKey]) {
             expandedChanges.push([subKey, { ...val, applyToSubs: false }]);
           }
@@ -3436,9 +3481,11 @@ _racSaveChanges() {
   };
 
   expandedChanges.forEach(([key, val]) => {
-    const [userIdStr, scope] = key.split(':');
+    const userIdStr = key.split(':', 1)[0];
     const userId = parseInt(userIdStr);
-    const channelId = scope === 'server' ? null : parseInt(scope);
+    const normalizedScope = key.slice(String(userId).length + 1);
+    const emitChannelId = normalizedScope.startsWith('channel:') ? parseInt(normalizedScope.slice(8), 10) : null;
+    const emitServerId = normalizedScope.startsWith('server:') ? parseInt(normalizedScope.slice(7), 10) : null;
 
     if (val.action === 'revoke') {
       // Revoke each role the user currently has at this scope
@@ -3446,7 +3493,7 @@ _racSaveChanges() {
       if (toRevoke.length === 0) { completed++; if (completed === total) onDone(); return; }
       let revokeCount = 0;
       toRevoke.forEach(roleId => {
-        this.socket.emit('revoke-role', { userId, roleId, channelId }, (res) => {
+        this.socket.emit('revoke-role', { userId, roleId, channelId: emitChannelId, serverId: emitServerId }, (res) => {
           revokeCount++;
           if (res && res.error) errors.push(res.error);
           if (revokeCount === toRevoke.length) {
@@ -3459,7 +3506,8 @@ _racSaveChanges() {
       this.socket.emit('assign-role', {
         userId,
         roleId: val.roleId,
-        channelId,
+        channelId: emitChannelId,
+        serverId: emitServerId,
         customLevel: val.level,
         customPerms: val.customPerms || null
       }, (res) => {
@@ -3531,6 +3579,125 @@ _initDonorsModal() {
   modal.addEventListener('click', (e) => {
     if (e.target === modal) modal.style.display = 'none';
   });
+},
+
+_setupStorageAdmin() {
+  const providerSelect = document.getElementById('storage-provider-select');
+  if (!providerSelect) return;
+  providerSelect.addEventListener('change', () => this._renderStorageAdminState());
+  document.getElementById('storage-save-btn')?.addEventListener('click', () => this._saveStorageConfiguration());
+  document.getElementById('storage-test-btn')?.addEventListener('click', () => this._testStorageConnection());
+  document.getElementById('storage-migrate-btn')?.addEventListener('click', () => this._migrateStorageUploads());
+  document.getElementById('storage-disconnect-btn')?.addEventListener('click', () => this._disconnectStorage());
+  this._loadStorageStatus();
+},
+
+async _loadStorageStatus() {
+  try {
+    const res = await fetch('/api/admin/storage/status', { headers: { Authorization: `Bearer ${this.token}` } });
+    if (!res.ok) return;
+    this._storageStatus = await res.json();
+    this._renderStorageAdminState();
+  } catch {}
+},
+
+_renderStorageAdminState() {
+  const status = this._storageStatus || {};
+  const providerSelect = document.getElementById('storage-provider-select');
+  if (!providerSelect) return;
+  const provider = providerSelect.value || status.provider || 'local';
+  const configured = provider === 's3' && !!status.configured;
+  const configuredPanel = document.getElementById('storage-configured-panel');
+  const configuredSummary = document.getElementById('storage-configured-summary');
+  const s3Settings = document.getElementById('storage-s3-settings');
+  const disconnectBtn = document.getElementById('storage-disconnect-btn');
+  const saveBtn = document.getElementById('storage-save-btn');
+  const statusNote = document.getElementById('storage-status-note');
+  const accessKey = document.getElementById('storage-s3-access-key');
+  const secretKey = document.getElementById('storage-s3-secret-key');
+  providerSelect.value = provider;
+  if (provider === 's3') {
+    if (status.endpoint) document.getElementById('storage-s3-endpoint').value = status.endpoint;
+    if (status.bucket) document.getElementById('storage-s3-bucket').value = status.bucket;
+    if (status.region) document.getElementById('storage-s3-region').value = status.region;
+    if (status.prefix !== undefined) document.getElementById('storage-s3-prefix').value = status.prefix || '';
+    document.getElementById('storage-s3-force-path-style').checked = status.forcePathStyle !== false;
+  }
+  if (configuredPanel) configuredPanel.style.display = configured ? 'block' : 'none';
+  if (configuredSummary) configuredSummary.textContent = configured ? `${status.bucket || 'bucket'} via ${status.endpoint || 'S3'}${status.prefix ? ` (${status.prefix})` : ''}` : '';
+  if (s3Settings) s3Settings.style.display = provider === 's3' ? 'block' : 'none';
+  if (disconnectBtn) disconnectBtn.style.display = configured ? '' : 'none';
+  if (saveBtn) saveBtn.textContent = configured ? 'Update S3 Setup' : 'Save S3 Setup';
+  if (accessKey) { accessKey.disabled = configured; accessKey.placeholder = configured ? 'Stored securely' : 'Access key ID'; }
+  if (secretKey) { secretKey.disabled = configured; secretKey.placeholder = configured ? 'Stored securely' : 'Secret access key'; }
+  if (statusNote) statusNote.textContent = status.pendingRestore ? 'A data restore is staged and will apply on restart.' : (configured ? 'S3 is active. You can test it, disconnect it, or migrate local uploads.' : '');
+},
+
+_collectStoragePayload(includeCredentials = true) {
+  const payload = {
+    provider: document.getElementById('storage-provider-select')?.value || 'local',
+    endpoint: document.getElementById('storage-s3-endpoint')?.value.trim() || '',
+    bucket: document.getElementById('storage-s3-bucket')?.value.trim() || '',
+    region: document.getElementById('storage-s3-region')?.value.trim() || 'auto',
+    prefix: document.getElementById('storage-s3-prefix')?.value.trim() || 'haven',
+    forcePathStyle: !!document.getElementById('storage-s3-force-path-style')?.checked
+  };
+  if (includeCredentials) {
+    payload.accessKeyId = document.getElementById('storage-s3-access-key')?.value.trim() || '';
+    payload.secretAccessKey = document.getElementById('storage-s3-secret-key')?.value.trim() || '';
+  }
+  return payload;
+},
+
+async _saveStorageConfiguration() {
+  try {
+    const res = await fetch('/api/admin/storage/configure', { method: 'POST', headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(this._collectStoragePayload(true)) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save storage');
+    this._storageStatus = data;
+    this._renderStorageAdminState();
+    this._showToast(data.provider === 's3' ? 'S3 storage saved' : 'Local storage enabled', 'success');
+  } catch (err) {
+    this._showToast(err.message || 'Failed to save storage', 'error');
+  }
+},
+
+async _testStorageConnection() {
+  try {
+    const res = await fetch('/api/admin/storage/test', { method: 'POST', headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(this._collectStoragePayload(!this._storageStatus?.configured)) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Connection test failed');
+    this._showToast('S3 connection succeeded', 'success');
+  } catch (err) {
+    this._showToast(err.message || 'Connection test failed', 'error');
+  }
+},
+
+async _migrateStorageUploads() {
+  try {
+    const res = await fetch('/api/admin/storage/migrate', { method: 'POST', headers: { Authorization: `Bearer ${this.token}` } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Migration failed');
+    this._showToast(`Moved ${data.migrated || 0} upload(s)`, 'success');
+  } catch (err) {
+    this._showToast(err.message || 'Migration failed', 'error');
+  }
+},
+
+async _disconnectStorage() {
+  if (!confirm('Disconnect S3 and switch back to local Haven storage?')) return;
+  try {
+    const res = await fetch('/api/admin/storage/disconnect', { method: 'POST', headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Disconnect failed');
+    document.getElementById('storage-s3-access-key').value = '';
+    document.getElementById('storage-s3-secret-key').value = '';
+    this._storageStatus = data;
+    this._renderStorageAdminState();
+    this._showToast('S3 disconnected', 'success');
+  } catch (err) {
+    this._showToast(err.message || 'Disconnect failed', 'error');
+  }
 },
 
 // ═══════════════════════════════════════════════════════

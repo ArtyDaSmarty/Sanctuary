@@ -23,13 +23,15 @@ class HavenApp {
     this.socket = null;
     this.voice = null;
     this.currentChannel = null;
+    this.currentServerId = null;
     this.channels = [];
+    this.servers = [];
     this.typingTimeout = null;
     this.lastTypingEmit = 0;
     this.unreadCounts = {};
     this.onlineCount = 0;
     this.pingInterval = null;
-    this.serverManager = new ServerManager();
+    this.serverManager = typeof ServerManager === 'function' ? new ServerManager() : null;
     this.notifications = new NotificationManager();
     this.replyingTo = null;        // message object being replied to
     this._imageQueue = [];         // queued images awaiting send
@@ -193,7 +195,6 @@ class HavenApp {
     this._setupLightbox();
     this._setupOnlineOverlay();
     this._setupModalExpand();
-    this._checkForUpdates();
     this._initDesktopAppBanner();
     this._initAndroidBetaBanner();
     this._initMoveMessages();
