@@ -399,6 +399,7 @@ _renderWebhooksList(webhooks) {
 
 _syncSettingsNav() {
   const isAdmin = document.getElementById('admin-mod-panel')?.style.display !== 'none';
+  const canManageServer = !!(this.user?.isAdmin || this._hasPerm('manage_server'));
   document.querySelectorAll('.settings-nav-admin').forEach(el => {
     el.style.display = isAdmin ? '' : 'none';
   });
@@ -417,11 +418,12 @@ _syncSettingsNav() {
   if (rolesNavItem && !isAdmin && this._hasPerm('manage_roles')) {
     rolesNavItem.style.display = '';
   }
-  // Show Server settings tab for users with manage_server permission
-  const serverNavItem = document.querySelector('.settings-nav-item[data-target="section-server"]');
-  if (serverNavItem && !isAdmin && this._hasPerm('manage_server')) {
-    serverNavItem.style.display = '';
-  }
+  document.querySelector('.settings-nav-item[data-target="section-server-customization"]')?.style.setProperty('display', canManageServer ? '' : 'none');
+  document.querySelector('.settings-nav-item[data-target="section-server-channels"]')?.style.setProperty('display', canManageServer ? '' : 'none');
+  const serverCustomization = document.getElementById('section-server-customization');
+  if (serverCustomization) serverCustomization.style.display = canManageServer ? '' : 'none';
+  const serverChannels = document.getElementById('section-server-channels');
+  if (serverChannels) serverChannels.style.display = canManageServer ? '' : 'none';
 },
 
 _snapshotAdminSettings() {
