@@ -5,7 +5,7 @@ const ALL_PERMS = [
   'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
   'create_channel', 'create_forum_posts', 'upload_files', 'use_voice', 'use_tts', 'manage_webhooks', 'mention_everyone', 'view_history',
   'view_all_members', 'manage_emojis', 'manage_soundboard', 'manage_music_queue', 'promote_user', 'transfer_admin',
-  'manage_roles', 'manage_server', 'delete_channel'
+  'manage_roles', 'manage_server', 'create_server', 'delete_channel'
 ];
 //Similarly flavored solution to perm labels
 const PERM_LABELS = {
@@ -26,7 +26,7 @@ const PERM_LABELS = {
   manage_soundboard: 'Manage Soundboard',
   manage_music_queue: 'Manage Music Queue',
   promote_user: 'Promote Users', transfer_admin: 'Transfer Admin',
-  manage_roles: 'Manage Roles', manage_server: 'Manage Server', delete_channel: 'Delete Channels'
+  manage_roles: 'Manage Roles', manage_server: 'Manage Server', create_server: 'Create Servers', delete_channel: 'Delete Channels'
 };
 
 export default {
@@ -371,6 +371,7 @@ _applyServerSettings() {
 
   // Always update visual branding regardless of modal state
   this._applyServerBranding();
+  if (typeof this._refreshSelectedServerSettings === 'function') this._refreshSelectedServerSettings();
 
   // Re-evaluate update banner visibility whenever settings change
   this._applyUpdateBanner();
@@ -444,7 +445,8 @@ _snapshotAdminSettings() {
     max_proxy_avatar_kb: this.serverSettings.max_proxy_avatar_kb || '256',
     max_poll_options: this.serverSettings.max_poll_options || '10',
     update_banner_admin_only: this.serverSettings.update_banner_admin_only || 'false',
-    default_theme: this.serverSettings.default_theme || ''
+    default_theme: this.serverSettings.default_theme || '',
+    subserver_name: this._getCurrentServerMeta?.()?.name || ''
   };
   // Load webhooks list for admin preview
   if (this.user?.isAdmin) {
@@ -545,6 +547,19 @@ _saveAdminSettings() {
     changed = true;
   }
 
+  const selectedServer = this._getCurrentServerMeta?.();
+  const subserverName = document.getElementById('subserver-name-input')?.value.trim() || '';
+  if (selectedServer?.id && subserverName && subserverName !== (snap.subserver_name || '')) {
+    this.socket.emit('update-subserver', {
+      serverId: selectedServer.id,
+      name: subserverName,
+      iconUrl: selectedServer.icon_url || ''
+    }, (res) => {
+      if (!res?.error) this.socket.emit('get-servers');
+    });
+    changed = true;
+  }
+
   if (changed) {
     this._showToast('Settings saved', 'success');
   } else {
@@ -584,6 +599,8 @@ _cancelAdminSettings() {
     if (uba) uba.checked = snap.update_banner_admin_only === 'true';
     const dt = document.getElementById('default-theme-select');
     if (dt) dt.value = snap.default_theme || '';
+    const ssn = document.getElementById('subserver-name-input');
+    if (ssn) ssn.value = snap.subserver_name || '';
   }
   document.getElementById('settings-modal').style.display = 'none';
 },
@@ -3177,7 +3194,7 @@ _renderRacConfig() {
   const callerIsAdmin = this._racData.callerIsAdmin;
   const allPerms = ALL_PERMS;
   // Perms that only admin can grant
-  const adminOnlyPerms = ['transfer_admin', 'manage_roles', 'manage_server', 'delete_channel'];
+  const adminOnlyPerms = ['transfer_admin', 'manage_roles', 'manage_server', 'create_server', 'delete_channel'];
   // Perms that require the caller to have them to be able to grant
   const permLabels = PERM_LABELS;
 
