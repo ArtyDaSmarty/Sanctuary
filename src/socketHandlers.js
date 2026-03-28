@@ -592,7 +592,7 @@ function setupSocketHandlers(io, db) {
   function getVisibleServers(userId, isAdmin) {
     if (isAdmin) {
       return db.prepare(`
-        SELECT s.id, s.name, s.code, s.icon_url, s.theme, s.created_by, s.created_at, s.position,
+        SELECT s.id, s.name, s.code, s.icon_url, s.theme, s.theme_force_override, s.created_by, s.created_at, s.position,
                (SELECT COUNT(*) FROM channels c WHERE c.server_id = s.id AND c.is_dm = 0) AS channel_count
         FROM servers s
         ORDER BY CASE WHEN s.name = 'Main' THEN 0 ELSE 1 END, s.position ASC, s.name COLLATE NOCASE ASC
@@ -600,7 +600,7 @@ function setupSocketHandlers(io, db) {
     }
 
     return db.prepare(`
-      SELECT DISTINCT s.id, s.name, s.code, s.icon_url, s.theme, s.created_by, s.created_at, s.position,
+      SELECT DISTINCT s.id, s.name, s.code, s.icon_url, s.theme, s.theme_force_override, s.created_by, s.created_at, s.position,
              (SELECT COUNT(*) FROM channels c WHERE c.server_id = s.id AND c.is_dm = 0) AS channel_count
       FROM servers s
       JOIN channels c ON c.server_id = s.id AND c.is_dm = 0
@@ -1170,12 +1170,13 @@ function setupSocketHandlers(io, db) {
 
       try {
         const result = db.prepare(
-          'INSERT INTO servers (name, code, icon_url, theme, created_by, position) VALUES (?, ?, ?, ?, ?, ?)'
+          'INSERT INTO servers (name, code, icon_url, theme, theme_force_override, created_by, position) VALUES (?, ?, ?, ?, ?, ?, ?)'
         ).run(
           name,
           generateServerCode(),
           String(data.iconUrl || '').trim(),
           String(data.theme || '').trim(),
+          data.themeForceOverride ? 1 : 0,
           socket.user.id,
           Number(db.prepare('SELECT COALESCE(MAX(position), 0) + 1 AS nextPos FROM servers').get()?.nextPos || 1)
         );
@@ -1208,10 +1209,11 @@ function setupSocketHandlers(io, db) {
       const name = typeof data.name === 'string' ? data.name.trim() : '';
       const iconUrl = typeof data.iconUrl === 'string' ? data.iconUrl.trim() : '';
       const theme = typeof data.theme === 'string' ? data.theme.trim() : '';
+      const themeForceOverride = data.themeForceOverride ? 1 : 0;
       if (!name || name.length > 30) return cb({ error: 'Server name must be 1-30 characters' });
 
       try {
-        db.prepare('UPDATE servers SET name = ?, icon_url = ?, theme = ? WHERE id = ?').run(name, iconUrl, theme, serverId);
+        db.prepare('UPDATE servers SET name = ?, icon_url = ?, theme = ?, theme_force_override = ? WHERE id = ?').run(name, iconUrl, theme, themeForceOverride, serverId);
         emitServersList(socket);
         broadcastChannelLists();
         cb({ ok: true });
