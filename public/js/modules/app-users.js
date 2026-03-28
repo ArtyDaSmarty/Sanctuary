@@ -1061,13 +1061,15 @@ _openProxyLibrary(userId, displayName) {
 
     const grouped = {};
     (res.proxies || []).forEach(proxy => {
+      const type = proxy.proxyType === 'character' ? 'Characters' : 'Alters';
       const group = proxy.groupName || 'Ungrouped';
-      if (!grouped[group]) grouped[group] = [];
-      grouped[group].push(proxy);
+      const key = `${type}::${group}`;
+      if (!grouped[key]) grouped[key] = { type, group, proxies: [] };
+      grouped[key].proxies.push(proxy);
     });
-    const groupsHtml = Object.entries(grouped).map(([group, proxies]) => `
+    const groupsHtml = Object.values(grouped).map(({ type, group, proxies }) => `
       <div class="proxy-library-group">
-        <div class="proxy-library-group-title">${this._escapeHtml(group)}</div>
+        <div class="proxy-library-group-title">${this._escapeHtml(type)}${group !== 'Ungrouped' ? ` • ${this._escapeHtml(group)}` : ''}</div>
         <div class="proxy-library-grid">
           ${proxies.map(proxy => `
             <article class="proxy-library-card">
@@ -1079,6 +1081,7 @@ _openProxyLibrary(userId, displayName) {
                 </div>
               </div>
               ${proxy.bio ? `<div class="proxy-library-bio">${this._formatContent(proxy.bio)}</div>` : ''}
+              <div class="proxy-library-privacy">${proxy.proxyType === 'character' ? 'CHARACTER' : 'ALTER'}</div>
               ${res.canViewPrivate ? `<div class="proxy-library-privacy">${proxy.isPublic ? 'Public' : 'Private'}</div>` : ''}
             </article>
           `).join('')}
