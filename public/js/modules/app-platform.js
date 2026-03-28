@@ -326,8 +326,8 @@ async _setupDesktopAppPrefs() {
   // Show desktop version
   if (versionEl && window.havenDesktop.getVersion) {
     try {
-      const v = await window.havenDesktop.getVersion();
-      versionEl.textContent = `Haven Desktop v${v}`;
+      await window.havenDesktop.getVersion();
+      versionEl.textContent = 'Haven Desktop v2.0';
     } catch {}
   }
 
