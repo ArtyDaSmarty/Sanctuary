@@ -24,6 +24,7 @@ class HavenApp {
     this.voice = null;
     this.currentChannel = null;
     this.currentServerId = null;
+    this.sidebarView = 'servers';
     this.channels = [];
     this.servers = [];
     this.typingTimeout = null;
@@ -40,6 +41,7 @@ class HavenApp {
     this.mentionStart = -1;        // cursor position of the '@'
     this.editingMsgId = null;      // message currently being edited
     this.serverSettings = {};      // server-wide settings
+    this.preferences = {};
     this.adminActionTarget = null; // { userId, username, action } for modal
     this.highScores = {};          // { flappy: [{user_id, username, score}] }
     this.userStatus = 'online';    // current user's status
