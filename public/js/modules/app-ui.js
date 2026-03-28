@@ -1827,7 +1827,6 @@ _setupUI() {
     target.scrollIntoView({ behavior: 'smooth', block: 'start' });
     document.querySelectorAll('.settings-nav-item').forEach(n => n.classList.remove('active'));
     item.classList.add('active');
-    if (targetId === 'section-data-monitoring') this._loadDataMonitoring?.();
   });
 
   // ── Password change ──────────────────────────────────
@@ -3867,10 +3866,10 @@ _prepareSettingsLayout() {
   const storageTitle = document.querySelector('#section-storage .settings-section-subtitle');
   if (storageTitle) storageTitle.textContent = '☁️ Upload Storage';
 
-  const logoutBtn = document.getElementById('settings-logout-btn');
   const settingsBody = document.querySelector('#settings-modal .settings-body');
   const settingsNav = document.getElementById('settings-nav');
   const adminGroup = settingsNav?.querySelector('.settings-nav-group.settings-nav-admin');
+  const adminPanel = settingsBody?.querySelector('#admin-mod-panel');
   document.getElementById('section-session-user')?.remove();
   const sessionSection = document.getElementById('section-session');
   if (settingsBody && settingsNav && sessionSection) {
@@ -3879,7 +3878,7 @@ _prepareSettingsLayout() {
     const hint = sessionSection.querySelector('.settings-hint');
     if (title) title.textContent = '💀 Logout';
     if (hint) hint.textContent = 'Log out before switching to another instance.';
-    settingsBody.appendChild(sessionSection);
+    settingsBody.insertBefore(sessionSection, adminPanel || null);
 
     let navItem = settingsNav.querySelector('.settings-nav-item[data-target="section-logout"]');
     if (!navItem) {
@@ -3956,6 +3955,9 @@ _prepareSettingsLayout() {
       subserverSection.insertBefore(toggle, subserverSection.querySelector('.server-icon-upload-area'));
     }
   }
+  if (settingsBody && subserverSection) {
+    settingsBody.insertBefore(subserverSection, adminPanel || null);
+  }
 
   if (settingsBody && !document.getElementById('section-server-channels')) {
     const section = document.createElement('div');
@@ -3968,8 +3970,7 @@ _prepareSettingsLayout() {
       <div id="server-channels-settings-slot" style="margin-top:8px;"></div>
       <button class="btn-sm btn-full" id="server-organize-channels-btn" style="margin-top:8px">Open Channel Organizer</button>
     `;
-    const invite = document.getElementById('section-invite');
-    settingsBody.querySelector('#admin-mod-panel')?.insertBefore(section, invite || null);
+    settingsBody.insertBefore(section, adminPanel || null);
     const adminControls = document.getElementById('admin-controls');
     if (adminControls) {
       adminControls.style.display = 'none';
@@ -3981,27 +3982,6 @@ _prepareSettingsLayout() {
       }
     }
     section.querySelector('#server-organize-channels-btn')?.addEventListener('click', () => document.getElementById('organize-channels-btn')?.click());
-  }
-
-  if (settingsBody && !document.getElementById('section-data-monitoring')) {
-    const section = document.createElement('div');
-    section.className = 'admin-settings';
-    section.id = 'section-data-monitoring';
-    section.style.cssText = 'margin-top:10px;padding-top:10px;border-top:1px solid var(--border);';
-    section.innerHTML = `
-      <h5 class="settings-section-subtitle">🖥️ Data Monitoring</h5>
-      <div id="data-monitoring-list" style="margin-top:8px"><p class="muted-text">Loading data usage...</p></div>
-    `;
-    settingsBody.querySelector('#admin-mod-panel')?.insertBefore(section, document.getElementById('section-uploads') || null);
-  }
-
-  if (settingsNav && !document.querySelector('.settings-nav-item[data-target="section-data-monitoring"]')) {
-    const navItem = document.createElement('div');
-    navItem.className = 'settings-nav-item settings-nav-admin';
-    navItem.dataset.target = 'section-data-monitoring';
-    navItem.style.display = 'none';
-    navItem.textContent = '🖥️ Data Monitoring';
-    settingsNav.insertBefore(navItem, document.querySelector('.settings-nav-item[data-target="section-uploads"]'));
   }
 
   if (settingsBody && !document.getElementById('section-admin-password-reset')) {
