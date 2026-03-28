@@ -455,7 +455,6 @@ function initDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id);
-    CREATE INDEX IF NOT EXISTS idx_user_roles_server ON user_roles(server_id);
     CREATE INDEX IF NOT EXISTS idx_user_roles_channel ON user_roles(channel_id);
   `);
   try {
@@ -463,6 +462,7 @@ function initDatabase() {
   } catch {
     db.exec('ALTER TABLE user_roles ADD COLUMN server_id INTEGER DEFAULT NULL REFERENCES servers(id) ON DELETE CASCADE');
   }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_user_roles_server ON user_roles(server_id)');
 
   // Seed default roles if none exist
   const roleCount = db.prepare('SELECT COUNT(*) as cnt FROM roles').get();
