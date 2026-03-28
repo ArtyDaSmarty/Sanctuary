@@ -3887,11 +3887,12 @@ _prepareSettingsLayout() {
   const sessionSection = document.getElementById('section-session');
   if (settingsBody && settingsNav && sessionSection) {
     sessionSection.id = 'section-logout';
+    sessionSection.className = 'settings-section';
+    sessionSection.style.cssText = '';
     const title = sessionSection.querySelector('.settings-section-subtitle');
     const hint = sessionSection.querySelector('.settings-hint');
     if (title) title.textContent = '💀 Logout';
     if (hint) hint.textContent = 'Log out before switching to another instance.';
-    settingsBody.insertBefore(sessionSection, adminPanel || null);
 
     let navItem = settingsNav.querySelector('.settings-nav-item[data-target="section-logout"]');
     if (!navItem) {
@@ -3925,14 +3926,17 @@ _prepareSettingsLayout() {
     settingsNav.insertBefore(invite, adminGroup || null);
   }
 
-  const inviteNav = settingsNav?.querySelector('.settings-nav-item[data-target="section-invite"]');
-  if (inviteNav) {
+  const inviteNavItems = settingsNav ? Array.from(settingsNav.querySelectorAll('.settings-nav-item[data-target="section-invite"]')) : [];
+  if (inviteNavItems.length) {
+    const inviteNav = inviteNavItems[0];
     inviteNav.classList.remove('settings-nav-admin');
     inviteNav.style.display = '';
+    inviteNav.textContent = '🌐 Invite Code';
     settingsNav.insertBefore(inviteNav, adminGroup || null);
+    inviteNavItems.slice(1).forEach(el => el.remove());
   }
 
-  const subserverSection = document.getElementById('section-subserver');
+  const subserverSection = document.getElementById('section-server-customization') || document.getElementById('section-subserver');
   if (subserverSection && subserverSection.id !== 'section-server-customization') {
     subserverSection.id = 'section-server-customization';
     const title = subserverSection.querySelector('.settings-section-subtitle');
@@ -3980,38 +3984,53 @@ _prepareSettingsLayout() {
       subserverSection.insertBefore(toggle, subserverSection.querySelector('.server-icon-upload-area'));
     }
   }
-  if (settingsBody && subserverSection) {
-    settingsBody.insertBefore(subserverSection, adminPanel || null);
+  if (subserverSection) {
+    subserverSection.className = 'settings-section';
+    subserverSection.style.cssText = '';
   }
 
-  if (settingsBody && !document.getElementById('section-server-channels')) {
-    const section = document.createElement('div');
-    section.className = 'admin-settings';
-    section.id = 'section-server-channels';
-    section.style.cssText = 'margin-top:10px;padding-top:10px;border-top:1px solid var(--border);';
-    section.innerHTML = `
+  let serverChannelsSection = document.getElementById('section-server-channels');
+  if (settingsBody && !serverChannelsSection) {
+    serverChannelsSection = document.createElement('div');
+    serverChannelsSection.className = 'settings-section';
+    serverChannelsSection.id = 'section-server-channels';
+    serverChannelsSection.innerHTML = `
       <h5 class="settings-section-subtitle">📋 Channels</h5>
       <small class="settings-hint">Create and organize channels for the selected server here.</small>
       <div id="server-channels-settings-slot" style="margin-top:8px;"></div>
       <button class="btn-sm btn-full" id="server-organize-channels-btn" style="margin-top:8px">Open Channel Organizer</button>
     `;
-    settingsBody.insertBefore(section, adminPanel || null);
-    const adminControls = document.getElementById('admin-controls');
-    if (adminControls) {
-      adminControls.style.display = 'none';
-      const body = adminControls.querySelector('.collapsible-section-body');
-      const slot = section.querySelector('#server-channels-settings-slot');
-      if (body && slot && !slot.children.length) {
-        slot.appendChild(body.cloneNode(true));
-        slot.querySelector('#create-channel-btn')?.addEventListener('click', () => document.getElementById('create-channel-btn')?.click());
-      }
-    }
-    section.querySelector('#server-organize-channels-btn')?.addEventListener('click', () => document.getElementById('organize-channels-btn')?.click());
+  } else if (serverChannelsSection) {
+    serverChannelsSection.className = 'settings-section';
+    serverChannelsSection.style.cssText = '';
   }
 
+  if (serverChannelsSection) {
+    const slot = serverChannelsSection.querySelector('#server-channels-settings-slot');
+    const createBody = document.getElementById('create-section-body');
+    if (slot && createBody && createBody.parentElement !== slot) {
+      createBody.classList.remove('collapsed');
+      createBody.style.maxHeight = '';
+      createBody.style.opacity = '';
+      createBody.style.marginTop = '';
+      createBody.style.marginBottom = '';
+      slot.replaceChildren(createBody);
+    }
+    serverChannelsSection.querySelector('#server-organize-channels-btn')?.addEventListener('click', () => this._openOrganizeModal?.(null, true));
+  }
+  document.getElementById('admin-controls')?.remove();
+
   const inviteSection = document.getElementById('section-invite');
-  if (settingsBody && inviteSection) {
-    settingsBody.insertBefore(inviteSection, document.getElementById('section-logout') || adminPanel || null);
+  if (inviteSection) {
+    inviteSection.className = 'settings-section';
+    inviteSection.style.cssText = '';
+  }
+
+  if (settingsBody) {
+    if (subserverSection) settingsBody.insertBefore(subserverSection, adminPanel || null);
+    if (serverChannelsSection) settingsBody.insertBefore(serverChannelsSection, adminPanel || null);
+    if (inviteSection) settingsBody.insertBefore(inviteSection, adminPanel || null);
+    if (sessionSection) settingsBody.insertBefore(sessionSection, adminPanel || null);
   }
 
   if (settingsBody && !document.getElementById('section-admin-password-reset')) {
