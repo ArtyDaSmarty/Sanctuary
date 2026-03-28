@@ -155,6 +155,13 @@ router.post('/register', async (req, res) => {
       }
     } catch { /* non-critical */ }
 
+    try {
+      const announcements = db.prepare("SELECT id FROM channels WHERE special_section = 'announcements' LIMIT 1").get();
+      if (announcements?.id) {
+        db.prepare('INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?, ?)').run(announcements.id, result.lastInsertRowid);
+      }
+    } catch { /* non-critical */ }
+
     const token = jwt.sign(
       { id: result.lastInsertRowid, username, isAdmin: !!isAdmin, displayName: username, pwv: 1 },
       JWT_SECRET,
