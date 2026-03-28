@@ -3,7 +3,7 @@
 
 Currently, this repository is used to fit the needs of, "Sanctuary"- A Haven instance I, ArtyDaSmarty, host. It is not aimed to be maintained for others, but if any like the differences, they can use it!
 
-## Current Differences To The Main Haven:
+## Current Differences To The Main Haven
 
 - Proxy/Persona System Built-In With Some QOL
 - Forum Channels
