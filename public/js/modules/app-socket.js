@@ -1098,16 +1098,17 @@ _setupSocketListeners() {
   // ── User preferences (persistent theme etc.) ───────
   this.socket.on('preferences', (prefs) => {
     this.preferences = prefs || {};
-    if (prefs.theme) {
-      // User has a saved personal theme preference — apply it
+    const selectedServer = (this.servers || []).find(s => s.id === this.currentServerId);
+    if (selectedServer?.theme && selectedServer?.theme_force_override) {
+      applyThemeFromServer(selectedServer.theme);
+    } else if (prefs.theme) {
       applyThemeFromServer(prefs.theme);
       localStorage.setItem('haven_user_theme_override', '1');
     } else if (localStorage.getItem('haven_user_theme_override') === '1' && localStorage.getItem('haven_theme')) {
       applyThemeFromServer(localStorage.getItem('haven_theme'));
-    } else if ((this.servers || []).find(s => s.id === this.currentServerId)?.theme) {
-      applyThemeFromServer((this.servers || []).find(s => s.id === this.currentServerId)?.theme);
+    } else if (selectedServer?.theme) {
+      applyThemeFromServer(selectedServer.theme);
     } else if (this.serverSettings.default_theme) {
-      // No personal preference — apply the server's default theme
       applyThemeFromServer(this.serverSettings.default_theme);
     }
   });
