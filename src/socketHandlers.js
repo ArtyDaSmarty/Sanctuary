@@ -6,13 +6,6 @@ const bcrypt = require('bcryptjs');
 const webpush = require('web-push');
 const { sendFcm, isFcmEnabled } = require('./fcm');
 const { DATA_DIR, UPLOADS_DIR, DELETED_ATTACHMENTS_DIR } = require('./paths');
-const {
-  hasSecureSetting,
-  moveUploadToDeleted,
-  SECURE_STORAGE_KEYS,
-  setSecureSetting,
-  STORAGE_KEYS
-} = require('./storage');
 const HAVEN_VERSION = require('../package.json').version;
 
 // ── Normalize SQLite timestamps to UTC ISO 8601 ────────
@@ -88,7 +81,11 @@ async function resolveSpotifyToYouTube(spotifyUrl) {
     for (const q of queries) {
       const results = await searchYouTube(q, 1);
       if (results.length > 0) {
-        return `https://www.youtube.com/watch?v=${results[0].videoId}`;
+        return {
+          url: `https://www.youtube.com/watch?v=${results[0].videoId}`,
+          title,
+          duration: results[0].duration || ''
+        };
       }
     }
     return null;
@@ -197,6 +194,18 @@ async function searchYouTube(query, count = 5, offset = 0) {
     return [];
   }
 }
+
+// All recognized role permissions. Any permission sent by a client that is not here is silently rejected.
+const VALID_ROLE_PERMS = [
+  'edit_own_messages', 'delete_own_messages', 'delete_message', 'delete_lower_messages',
+  'pin_message', 'archive_messages', 'kick_user', 'mute_user', 'ban_user',
+  'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
+  'create_channel', 'create_forum_posts', 'upload_files', 'use_voice', 'use_tts',
+  'manage_webhooks', 'mention_everyone', 'view_history', 'view_all_members',
+  'manage_emojis', 'manage_soundboard', 'manage_music_queue',
+  'promote_user', 'transfer_admin', 'manage_roles', 'manage_server', 'delete_channel'
+];
+
 function setupSocketHandlers(io, db) {
   const ADMIN_USERNAME = (process.env.ADMIN_USERNAME || 'admin').toLowerCase();
 
@@ -2121,9 +2130,12 @@ function setupSocketHandlers(io, db) {
       // Spotify embeds are 30-second preview only (non-premium) with no external API
       const isSpotify = /open\.spotify\.com\/(track|album|playlist|episode|show)\/[a-zA-Z0-9]+/.test(data.url);
       if (isSpotify) {
-        const ytUrl = await resolveSpotifyToYouTube(data.url);
-        if (ytUrl) {
-          playUrl = ytUrl;
+        const resolved = await resolveSpotifyToYouTube(data.url);
+        if (resolved?.url) {
+          playUrl = resolved.url;
+          resolvedFrom = 'spotify';
+        } else if (typeof resolved === 'string' && resolved) {
+          playUrl = resolved;
           resolvedFrom = 'spotify';
         } else {
           // Resolution failed — notify the sharer instead of passing a broken embed
@@ -2154,8 +2166,17 @@ function setupSocketHandlers(io, db) {
       if (!isString(data.code, 8, 8)) return;
       const voiceRoom = voiceUsers.get(data.code);
       if (!voiceRoom || !voiceRoom.has(socket.user.id)) return;
+      const current = activeMusic.get(data.code);
+      if (!current) return;
+      if (socket.user.id !== current.userId && !socket.user.isAdmin) {
+        const channel = db.prepare('SELECT id FROM channels WHERE code = ?').get(data.code);
+        if (!channel || !userHasPermission(socket.user.id, 'manage_music_queue', channel.id)) {
+          return socket.emit('error-msg', 'Only the requestor or a moderator can stop playback');
+        }
+      }
       // Clear active music
       activeMusic.delete(data.code);
+      musicQueues.delete(data.code);
       for (const [uid, user] of voiceRoom) {
         io.to(user.socketId).emit('music-stopped', {
           userId: socket.user.id,
@@ -2163,6 +2184,7 @@ function setupSocketHandlers(io, db) {
           channelCode: data.code
         });
       }
+      broadcastMusicQueue(data.code);
     });
 
     // Music playback control sync (play/pause/next/prev/shuffle)
@@ -2174,13 +2196,30 @@ function setupSocketHandlers(io, db) {
       if (!allowed.includes(action)) return;
       const voiceRoom = voiceUsers.get(data.code);
       if (!voiceRoom || !voiceRoom.has(socket.user.id)) return;
+      const current = activeMusic.get(data.code);
+      if (!current) return;
+      if (socket.user.id !== current.userId && !socket.user.isAdmin) {
+        const channel = db.prepare('SELECT id FROM channels WHERE code = ?').get(data.code);
+        if (!channel || !userHasPermission(socket.user.id, 'manage_music_queue', channel.id)) {
+          const label = (action === 'play' || action === 'pause') ? 'pause/resume playback' : 'skip tracks';
+          return socket.emit('error-msg', `Only the requestor or a moderator can ${label}`);
+        }
+      }
+      const rawPosition = Number(data.positionSeconds);
+      const rawDuration = Number(data.durationSeconds);
+      const syncState = updateActiveMusicPlaybackState(data.code, {
+        isPlaying: action === 'play' ? true : action === 'pause' ? false : undefined,
+        positionSeconds: Number.isFinite(rawPosition) ? rawPosition : undefined,
+        durationSeconds: Number.isFinite(rawDuration) && rawDuration >= 0 ? rawDuration : undefined
+      });
       for (const [uid, user] of voiceRoom) {
         if (uid === socket.user.id) continue; // don't echo back to sender
         io.to(user.socketId).emit('music-control', {
           action,
           userId: socket.user.id,
           username: socket.user.displayName,
-          channelCode: data.code
+          channelCode: data.code,
+          syncState
         });
       }
     });
@@ -2189,22 +2228,142 @@ function setupSocketHandlers(io, db) {
     socket.on('music-seek', (data) => {
       if (!data || typeof data !== 'object') return;
       if (!isString(data.code, 8, 8)) return;
-      const position = parseFloat(data.position);
-      if (isNaN(position) || position < 0 || position > 100) return;
       const voiceRoom = voiceUsers.get(data.code);
       if (!voiceRoom || !voiceRoom.has(socket.user.id)) return;
+      const current = activeMusic.get(data.code);
+      if (!current) return;
+      if (socket.user.id !== current.userId && !socket.user.isAdmin) {
+        const channel = db.prepare('SELECT id FROM channels WHERE code = ?').get(data.code);
+        if (!channel || !userHasPermission(socket.user.id, 'manage_music_queue', channel.id)) {
+          return socket.emit('error-msg', 'Only the requestor or a moderator can seek');
+        }
+      }
+      const rawDuration = Number(data.durationSeconds);
+      const durationSeconds = Number.isFinite(rawDuration) && rawDuration >= 0 ? rawDuration : undefined;
+      let positionSeconds = Number(data.positionSeconds);
+      if (!Number.isFinite(positionSeconds)) {
+        const positionPct = Number(data.position);
+        if (!Number.isFinite(positionPct) || positionPct < 0 || positionPct > 100 || !Number.isFinite(durationSeconds)) return;
+        positionSeconds = (durationSeconds * positionPct) / 100;
+      }
+      const syncState = updateActiveMusicPlaybackState(data.code, {
+        positionSeconds,
+        durationSeconds
+      });
       for (const [uid, user] of voiceRoom) {
         if (uid === socket.user.id) continue;
         io.to(user.socketId).emit('music-seek', {
-          position,
+          position: syncState && Number.isFinite(syncState.durationSeconds) && syncState.durationSeconds > 0
+            ? (syncState.positionSeconds / syncState.durationSeconds) * 100
+            : undefined,
+          positionSeconds: syncState ? syncState.positionSeconds : positionSeconds,
+          durationSeconds: syncState ? syncState.durationSeconds : (durationSeconds ?? null),
           userId: socket.user.id,
           username: socket.user.displayName,
-          channelCode: data.code
+          channelCode: data.code,
+          syncState
         });
       }
     });
 
     // Music search — user types /play <query> to search by name
+    socket.on('music-finished', (data) => {
+      if (!data || typeof data !== 'object') return;
+      if (!isString(data.code, 8, 8)) return;
+      const voiceRoom = voiceUsers.get(data.code);
+      if (!voiceRoom || !voiceRoom.has(socket.user.id)) return;
+      const current = activeMusic.get(data.code);
+      if (!current) return;
+      const trackId = trimMusicText(data.trackId, 64);
+      if (!trackId || !current.id || trackId !== current.id) return;
+      const isPrivileged = socket.user.id === current.userId || socket.user.isAdmin || (() => {
+        const channel = db.prepare('SELECT id FROM channels WHERE code = ?').get(data.code);
+        return !!channel && userHasPermission(socket.user.id, 'manage_music_queue', channel.id);
+      })();
+      if (data.isSkip) {
+        if (!isPrivileged) {
+          return socket.emit('error-msg', 'Only the requestor or a moderator can skip tracks');
+        }
+      } else if (!isPrivileged && !isNaturalMusicFinish(current, Number(data.positionSeconds), Number(data.durationSeconds))) {
+        return;
+      }
+      const next = popNextQueuedMusic(data.code);
+      if (next) {
+        startQueuedMusic(data.code, next);
+        return;
+      }
+      activeMusic.delete(data.code);
+      for (const [, user] of voiceRoom) {
+        io.to(user.socketId).emit('music-stopped', {
+          userId: current.userId,
+          username: current.username,
+          channelCode: data.code
+        });
+      }
+      broadcastMusicQueue(data.code);
+    });
+
+    socket.on('music-queue-remove', (data) => {
+      if (!data || typeof data !== 'object') return;
+      if (!isString(data.code, 8, 8) || !isString(data.entryId, 1, 64)) return;
+      const voiceRoom = voiceUsers.get(data.code);
+      if (!voiceRoom || !voiceRoom.has(socket.user.id)) return;
+      const channel = db.prepare('SELECT id FROM channels WHERE code = ?').get(data.code);
+      if (!channel) return;
+      if (!socket.user.isAdmin && !userHasPermission(socket.user.id, 'manage_music_queue', channel.id)) {
+        return socket.emit('error-msg', 'You do not have permission to manage the music queue');
+      }
+      const queue = musicQueues.get(data.code) || [];
+      const nextQueue = queue.filter(item => item.id !== data.entryId);
+      if (nextQueue.length > 0) musicQueues.set(data.code, nextQueue);
+      else musicQueues.delete(data.code);
+      broadcastMusicQueue(data.code);
+    });
+
+    socket.on('music-queue-reorder', (data) => {
+      if (!data || typeof data !== 'object') return;
+      if (!isString(data.code, 8, 8) || !Array.isArray(data.entryIds)) return;
+      if (data.entryIds.length > 200) return;
+      const voiceRoom = voiceUsers.get(data.code);
+      if (!voiceRoom || !voiceRoom.has(socket.user.id)) return;
+      const channel = db.prepare('SELECT id FROM channels WHERE code = ?').get(data.code);
+      if (!channel) return;
+      if (!socket.user.isAdmin && !userHasPermission(socket.user.id, 'manage_music_queue', channel.id)) {
+        return socket.emit('error-msg', 'You do not have permission to manage the music queue');
+      }
+      const queue = musicQueues.get(data.code) || [];
+      if (queue.length < 2) return;
+      const byId = new Map(queue.map(item => [item.id, item]));
+      const reordered = [];
+      for (const entryId of data.entryIds.map(id => trimMusicText(id, 64))) {
+        const item = byId.get(entryId);
+        if (item) reordered.push(item);
+      }
+      if (reordered.length !== queue.length) return;
+      musicQueues.set(data.code, reordered);
+      broadcastMusicQueue(data.code);
+    });
+
+    socket.on('music-queue-shuffle', (data) => {
+      if (!data || typeof data !== 'object') return;
+      if (!isString(data.code, 8, 8)) return;
+      const voiceRoom = voiceUsers.get(data.code);
+      if (!voiceRoom || !voiceRoom.has(socket.user.id)) return;
+      const channel = db.prepare('SELECT id FROM channels WHERE code = ?').get(data.code);
+      if (!channel) return;
+      if (!socket.user.isAdmin && !userHasPermission(socket.user.id, 'manage_music_queue', channel.id)) {
+        return socket.emit('error-msg', 'You do not have permission to manage the music queue');
+      }
+      const queue = musicQueues.get(data.code) || [];
+      if (queue.length < 2) return;
+      for (let i = queue.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [queue[i], queue[j]] = [queue[j], queue[i]];
+      }
+      musicQueues.set(data.code, queue);
+      broadcastMusicQueue(data.code);
+    });
+
     socket.on('music-search', async (data) => {
       if (!data || typeof data !== 'object') return;
       if (!isString(data.query, 1, 200)) return;
@@ -2822,7 +2981,11 @@ function setupSocketHandlers(io, db) {
       const uploadRe = /\/uploads\/((?!deleted-attachments)[\w\-.]+)/g;
       let m;
       while ((m = uploadRe.exec(msg.content || '')) !== null) {
-        moveUploadToDeleted(m[1]).catch(() => {});
+        const src = path.join(UPLOADS_DIR, m[1]);
+        const dst = path.join(DELETED_ATTACHMENTS_DIR, m[1]);
+        if (fs.existsSync(src)) {
+          try { fs.renameSync(src, dst); } catch { /* file locked or already moved */ }
+        }
       }
 
       io.to(`channel:${code}`).emit('message-deleted', {
@@ -3551,29 +3714,14 @@ function setupSocketHandlers(io, db) {
 
     // ═══════════════ SERVER SETTINGS ════════════════════════
 
-    const canManageServerSettings = (sock) => !!(sock?.user && (sock.user.isAdmin || userHasPermission(sock.user.id, 'manage_server')));
-
-    const emitSettingToPrivilegedClients = (key, value) => {
-      for (const sock of io.sockets.sockets.values()) {
-        if (!canManageServerSettings(sock)) continue;
-        sock.emit('server-setting-changed', { key, value });
-      }
-    };
-
     socket.on('get-server-settings', () => {
       const rows = db.prepare('SELECT key, value FROM server_settings').all();
       const settings = {};
-      const privileged = canManageServerSettings(socket);
       const sensitiveKeys = ['giphy_api_key', 'server_code'];
       rows.forEach(r => {
-        if (SECURE_STORAGE_KEYS.includes(r.key)) return;
-        if (sensitiveKeys.includes(r.key) && !privileged) return;
+        if (sensitiveKeys.includes(r.key) && !socket.user.isAdmin) return;
         settings[r.key] = r.value;
       });
-      if (privileged) {
-        settings.storage_s3_access_key_configured = hasSecureSetting('storage_s3_access_key', db) ? 'true' : 'false';
-        settings.storage_s3_secret_key_configured = hasSecureSetting('storage_s3_secret_key', db) ? 'true' : 'false';
-      }
       socket.emit('server-settings', settings);
     });
 
@@ -3714,7 +3862,7 @@ function setupSocketHandlers(io, db) {
       const key = typeof data.key === 'string' ? data.key.trim() : '';
       const value = typeof data.value === 'string' ? data.value.trim() : '';
 
-      const allowedKeys = ['member_visibility', 'cleanup_enabled', 'cleanup_max_age_days', 'cleanup_max_size_mb', 'giphy_api_key', 'server_name', 'server_title', 'server_icon', 'permission_thresholds', 'tunnel_enabled', 'tunnel_provider', 'server_code', 'max_upload_mb', 'max_poll_options', 'max_sound_kb', 'max_emoji_kb', 'max_proxy_avatar_kb', 'setup_wizard_complete', 'update_banner_admin_only', 'default_theme', 'channel_sort_mode', ...STORAGE_KEYS];
+      const allowedKeys = ['member_visibility', 'cleanup_enabled', 'cleanup_max_age_days', 'cleanup_max_size_mb', 'giphy_api_key', 'server_name', 'server_title', 'server_icon', 'permission_thresholds', 'tunnel_enabled', 'tunnel_provider', 'server_code', 'max_upload_mb', 'max_poll_options', 'max_sound_kb', 'max_emoji_kb', 'max_proxy_avatar_kb', 'setup_wizard_complete', 'update_banner_admin_only', 'default_theme', 'channel_sort_mode'];
       if (!allowedKeys.includes(key)) return;
 
       if (key === 'member_visibility' && !['all', 'online', 'none'].includes(value)) return;
@@ -3769,14 +3917,6 @@ function setupSocketHandlers(io, db) {
         const validThemes = ['', 'haven', 'discord', 'matrix', 'fallout', 'ffx', 'ice', 'nord', 'darksouls', 'eldenring', 'bloodborne', 'cyberpunk', 'lotr', 'abyss', 'scripture', 'chapel', 'gospel', 'tron', 'halo', 'dracula', 'win95'];
         if (!validThemes.includes(value)) return;
       }
-      if (key === 'storage_provider' && !['local', 's3'].includes(value)) return;
-      if (key === 'storage_s3_force_path_style' && !['true', 'false'].includes(value)) return;
-      if (key === 'storage_s3_region' && value.length > 64) return;
-      if (key === 'storage_s3_bucket' && value.length > 255) return;
-      if (key === 'storage_s3_endpoint' && value.length > 512) return;
-      if (key === 'storage_s3_access_key' && value.length > 256) return;
-      if (key === 'storage_s3_secret_key' && value.length > 256) return;
-      if (key === 'storage_s3_prefix' && value.length > 255) return;
       if (key === 'server_code') {
         // Server code is managed via generate/rotate events, not directly
         return;
@@ -3786,14 +3926,7 @@ function setupSocketHandlers(io, db) {
         try {
           const obj = JSON.parse(value);
           if (typeof obj !== 'object' || Array.isArray(obj)) return;
-          const validPerms = [
-            'edit_own_messages', 'delete_own_messages', 'delete_message', 'delete_lower_messages',
-            'pin_message', 'kick_user', 'mute_user', 'ban_user',
-            'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
-            'create_forum_posts', 'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-            'promote_user', 'transfer_admin', 'archive_messages', 'create_channel', 'manage_emojis', 'manage_soundboard',
-            'manage_roles', 'manage_server', 'delete_channel'
-          ];
+          const validPerms = VALID_ROLE_PERMS;
           for (const [k, v] of Object.entries(obj)) {
             if (!validPerms.includes(k)) return;
             if (!Number.isInteger(v) || v < 1 || v > 100) return;
@@ -3802,31 +3935,16 @@ function setupSocketHandlers(io, db) {
       }
 
       try {
-        if (SECURE_STORAGE_KEYS.includes(key)) {
-          if (!value) {
-            emitSettingToPrivilegedClients(`${key}_configured`, hasSecureSetting(key, db) ? 'true' : 'false');
-            return;
-          }
-          setSecureSetting(key, value, db);
-        } else {
-          db.prepare(
-            'INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)'
-          ).run(key, value);
-        }
+        db.prepare(
+          'INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)'
+        ).run(key, value);
       } catch (err) {
         console.error('Failed to save server setting:', key, err.message);
         return socket.emit('error-msg', 'Failed to save setting — database write error');
       }
 
-      if (SECURE_STORAGE_KEYS.includes(key)) {
-        emitSettingToPrivilegedClients(`${key}_configured`, 'true');
-      } else if (key === 'server_code') {
-        emitSettingToPrivilegedClients(key, value);
-      } else if (key === 'giphy_api_key') {
-        socket.emit('server-setting-changed', { key, value });
-      } else {
-        io.emit('server-setting-changed', { key, value });
-      }
+      // Broadcast to all connected clients
+      io.emit('server-setting-changed', { key, value });
 
       // If visibility changed, re-emit online users for all channels
       if (key === 'member_visibility') {
@@ -3844,7 +3962,7 @@ function setupSocketHandlers(io, db) {
       }
       const code = generateChannelCode();
       db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('server_code', code);
-      emitSettingToPrivilegedClients('server_code', code);
+      io.emit('server-setting-changed', { key: 'server_code', value: code });
       socket.emit('error-msg', `Server invite code generated: ${code}`);
     });
 
@@ -3853,7 +3971,7 @@ function setupSocketHandlers(io, db) {
         return socket.emit('error-msg', 'Only admins can manage server codes');
       }
       db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('server_code', '');
-      emitSettingToPrivilegedClients('server_code', '');
+      io.emit('server-setting-changed', { key: 'server_code', value: '' });
       socket.emit('error-msg', 'Server invite code cleared');
     });
 
@@ -5349,14 +5467,7 @@ function setupSocketHandlers(io, db) {
 
         // Add permissions
         const perms = Array.isArray(data.permissions) ? data.permissions : [];
-        const validPerms = [
-          'kick_user', 'mute_user', 'ban_user', 'delete_message', 'delete_own_messages',
-          'delete_lower_messages', 'edit_own_messages', 'pin_message', 'set_channel_topic',
-          'manage_sub_channels', 'rename_channel', 'rename_sub_channel', 'create_forum_posts',
-          'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-          'promote_user', 'transfer_admin', 'archive_messages', 'create_channel', 'manage_emojis', 'manage_soundboard',
-          'manage_roles', 'manage_server', 'delete_channel'
-        ];
+        const validPerms = VALID_ROLE_PERMS;
         // Escalation guard: non-admins cannot grant permissions they don't have
         const adminOnlyPerms = ['transfer_admin', 'manage_roles', 'manage_server', 'delete_channel'];
         const insertPerm = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, permission, allowed) VALUES (?, ?, 1)');
@@ -5413,14 +5524,7 @@ function setupSocketHandlers(io, db) {
 
         // Update permissions
         if (Array.isArray(data.permissions)) {
-          const validPerms = [
-            'kick_user', 'mute_user', 'ban_user', 'delete_message', 'delete_own_messages',
-            'delete_lower_messages', 'edit_own_messages', 'pin_message', 'set_channel_topic',
-            'manage_sub_channels', 'rename_channel', 'rename_sub_channel', 'create_forum_posts',
-            'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-            'promote_user', 'transfer_admin', 'archive_messages', 'create_channel', 'manage_emojis', 'manage_soundboard',
-            'manage_roles', 'manage_server', 'delete_channel', 'view_all_members'
-          ];
+          const validPerms = [...VALID_ROLE_PERMS];
           // Escalation guard: non-admins cannot grant permissions they don't have
           const adminOnlyPerms = ['transfer_admin', 'manage_roles', 'manage_server', 'delete_channel'];
           db.prepare('DELETE FROM role_permissions WHERE role_id = ?').run(roleId);
@@ -5483,16 +5587,16 @@ function setupSocketHandlers(io, db) {
         const insertPerm = db.prepare('INSERT INTO role_permissions (role_id, permission, allowed) VALUES (?, ?, 1)');
 
         const serverMod = insertRole.run('Server Mod', 50, 'server', '#3498db');
-        ['kick_user','mute_user','delete_message','pin_message','set_channel_topic','manage_sub_channels','rename_channel','rename_sub_channel','create_forum_posts','delete_lower_messages','manage_webhooks','upload_files','use_voice','view_history','view_all_members','delete_own_messages','edit_own_messages']
+        ['kick_user','mute_user','delete_message','pin_message','set_channel_topic','manage_sub_channels','rename_channel','rename_sub_channel','create_forum_posts','delete_lower_messages','manage_webhooks','upload_files','use_voice','view_history','view_all_members','manage_music_queue','delete_own_messages','edit_own_messages']
           .forEach(p => insertPerm.run(serverMod.lastInsertRowid, p));
 
         const channelMod = insertRole.run('Channel Mod', 25, 'channel', '#2ecc71');
-        ['kick_user','mute_user','delete_message','pin_message','manage_sub_channels','rename_sub_channel','create_forum_posts','delete_lower_messages','upload_files','use_voice','view_history','delete_own_messages','edit_own_messages']
+        ['kick_user','mute_user','delete_message','pin_message','manage_sub_channels','rename_sub_channel','create_forum_posts','delete_lower_messages','upload_files','use_voice','view_history','manage_music_queue','delete_own_messages','edit_own_messages']
           .forEach(p => insertPerm.run(channelMod.lastInsertRowid, p));
 
         const userRole = insertRole.run('User', 1, 'server', '#95a5a6');
         db.prepare('UPDATE roles SET auto_assign = 1 WHERE id = ?').run(userRole.lastInsertRowid);
-        ['delete_own_messages','edit_own_messages','upload_files','use_voice','view_history','create_forum_posts']
+        ['delete_own_messages','edit_own_messages','upload_files','use_voice','view_history','use_tts','create_forum_posts']
           .forEach(p => insertPerm.run(userRole.lastInsertRowid, p));
 
         // Auto-assign the User role to all existing users
@@ -6009,13 +6113,7 @@ function setupSocketHandlers(io, db) {
             const r = db.prepare("INSERT INTO roles (name, level, scope, color) VALUES ('Former Admin', 99, 'server', '#e74c3c')").run();
             formerAdminRole = { id: r.lastInsertRowid };
             // Give all permissions
-            const allPerms = [
-              'kick_user', 'mute_user', 'ban_user', 'delete_message', 'delete_own_messages',
-              'delete_lower_messages', 'edit_own_messages', 'pin_message', 'set_channel_topic',
-              'manage_sub_channels', 'rename_channel', 'rename_sub_channel', 'create_forum_posts',
-              'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-              'manage_emojis', 'manage_soundboard', 'promote_user', 'transfer_admin'
-            ];
+            const allPerms = [...VALID_ROLE_PERMS];
             const insertPerm = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, permission, allowed) VALUES (?, ?, 1)');
             allPerms.forEach(p => insertPerm.run(formerAdminRole.id, p));
           }
@@ -6948,6 +7046,7 @@ function setupSocketHandlers(io, db) {
         spoiler:   () => arg ? ({ content: `||${arg}||` }) : null,
         tts:       () => {
           if (!arg) return null;
+          if (!userHasPermission(socket.user.id, 'use_tts')) return { content: '_You do not have permission to use TTS._' };
           // Cap TTS content length to prevent abuse
           const ttsContent = arg.length > 500 ? arg.slice(0, 500) + '…' : arg;
           return { content: ttsContent, tts: true };

@@ -1,3 +1,34 @@
+//Shared permission list instead of declaring the same multiple times
+const ALL_PERMS = [
+  'edit_own_messages', 'delete_own_messages', 'delete_message', 'delete_lower_messages',
+  'pin_message', 'archive_messages', 'kick_user', 'mute_user', 'ban_user',
+  'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
+  'create_channel', 'create_forum_posts', 'upload_files', 'use_voice', 'use_tts', 'manage_webhooks', 'mention_everyone', 'view_history',
+  'view_all_members', 'manage_emojis', 'manage_soundboard', 'manage_music_queue', 'promote_user', 'transfer_admin',
+  'manage_roles', 'manage_server', 'delete_channel'
+];
+//Similarly flavored solution to perm labels
+const PERM_LABELS = {
+  edit_own_messages: 'Edit Own Messages', delete_own_messages: 'Delete Own Messages',
+  delete_message: 'Delete Any Message', delete_lower_messages: 'Delete Lower-level Messages',
+  pin_message: 'Pin Messages', archive_messages: 'Protect Messages',
+  kick_user: 'Kick Users', mute_user: 'Mute Users', ban_user: 'Ban Users',
+  rename_channel: 'Rename Channels', rename_sub_channel: 'Rename Sub-channels',
+  set_channel_topic: 'Set Channel Topic', manage_sub_channels: 'Manage Sub-channels',
+  create_channel: 'Create Channels',
+  create_forum_posts: 'Create Forum Posts',
+  upload_files: 'Upload Files', use_voice: 'Use Voice Chat',
+  use_tts: 'Use Text-to-Speech',
+  manage_webhooks: 'Manage Webhooks', mention_everyone: 'Mention @everyone',
+  view_history: 'View Message History',
+  view_all_members: 'View All Server Members',
+  manage_emojis: 'Manage Custom Emojis',
+  manage_soundboard: 'Manage Soundboard',
+  manage_music_queue: 'Manage Music Queue',
+  promote_user: 'Promote Users', transfer_admin: 'Transfer Admin',
+  manage_roles: 'Manage Roles', manage_server: 'Manage Server', delete_channel: 'Delete Channels'
+};
+
 export default {
 
 // ── First-Time Setup Wizard ─────────────────────────────
@@ -306,34 +337,6 @@ _applyServerSettings() {
     if (maxPollOpts) {
       maxPollOpts.value = this.serverSettings.max_poll_options || '10';
     }
-    const storageProvider = document.getElementById('storage-provider-select');
-    if (storageProvider) {
-      storageProvider.value = this.serverSettings.storage_provider || 'local';
-    }
-    const s3Endpoint = document.getElementById('storage-s3-endpoint');
-    if (s3Endpoint) s3Endpoint.value = this.serverSettings.storage_s3_endpoint || '';
-    const s3Bucket = document.getElementById('storage-s3-bucket');
-    if (s3Bucket) s3Bucket.value = this.serverSettings.storage_s3_bucket || '';
-    const s3Region = document.getElementById('storage-s3-region');
-    if (s3Region) s3Region.value = this.serverSettings.storage_s3_region || 'auto';
-    const s3AccessKey = document.getElementById('storage-s3-access-key');
-    if (s3AccessKey) {
-      s3AccessKey.value = '';
-      s3AccessKey.placeholder = this.serverSettings.storage_s3_access_key_configured === 'true'
-        ? 'Stored securely on server — leave blank to keep current key'
-        : 'Access key ID';
-    }
-    const s3SecretKey = document.getElementById('storage-s3-secret-key');
-    if (s3SecretKey) {
-      s3SecretKey.value = '';
-      s3SecretKey.placeholder = this.serverSettings.storage_s3_secret_key_configured === 'true'
-        ? 'Stored securely on server — leave blank to keep current secret'
-        : 'Secret access key';
-    }
-    const s3Prefix = document.getElementById('storage-s3-prefix');
-    if (s3Prefix) s3Prefix.value = this.serverSettings.storage_s3_prefix || 'haven';
-    const s3PathStyle = document.getElementById('storage-s3-force-path-style');
-    if (s3PathStyle) s3PathStyle.checked = (this.serverSettings.storage_s3_force_path_style || 'true') === 'true';
     const whitelistToggle = document.getElementById('whitelist-enabled');
     if (whitelistToggle) {
       whitelistToggle.checked = this.serverSettings.whitelist_enabled === 'true';
@@ -357,7 +360,6 @@ _applyServerSettings() {
 
     if (typeof this._renderPermThresholds === 'function') this._renderPermThresholds();
   }
-  if (typeof this._refreshStorageAdminUI === 'function') this._refreshStorageAdminUI();
 
   // Server invite code — always update even while modal is open (live action, not Save flow)
   const serverCodeEl = document.getElementById('server-code-value');
@@ -441,14 +443,6 @@ _snapshotAdminSettings() {
     max_emoji_kb: this.serverSettings.max_emoji_kb || '256',
     max_proxy_avatar_kb: this.serverSettings.max_proxy_avatar_kb || '256',
     max_poll_options: this.serverSettings.max_poll_options || '10',
-    storage_provider: this.serverSettings.storage_provider || 'local',
-    storage_s3_endpoint: this.serverSettings.storage_s3_endpoint || '',
-    storage_s3_bucket: this.serverSettings.storage_s3_bucket || '',
-    storage_s3_region: this.serverSettings.storage_s3_region || 'auto',
-    storage_s3_access_key_configured: this.serverSettings.storage_s3_access_key_configured || 'false',
-    storage_s3_secret_key_configured: this.serverSettings.storage_s3_secret_key_configured || 'false',
-    storage_s3_prefix: this.serverSettings.storage_s3_prefix || 'haven',
-    storage_s3_force_path_style: this.serverSettings.storage_s3_force_path_style || 'true',
     update_banner_admin_only: this.serverSettings.update_banner_admin_only || 'false',
     default_theme: this.serverSettings.default_theme || ''
   };
@@ -539,54 +533,6 @@ _saveAdminSettings() {
     changed = true;
   }
 
-  const storageProvider = document.getElementById('storage-provider-select')?.value || 'local';
-  if (storageProvider !== (snap.storage_provider || 'local')) {
-    this.socket.emit('update-server-setting', { key: 'storage_provider', value: storageProvider });
-    changed = true;
-  }
-
-  const s3Endpoint = document.getElementById('storage-s3-endpoint')?.value.trim() || '';
-  if (s3Endpoint !== (snap.storage_s3_endpoint || '')) {
-    this.socket.emit('update-server-setting', { key: 'storage_s3_endpoint', value: s3Endpoint });
-    changed = true;
-  }
-
-  const s3Bucket = document.getElementById('storage-s3-bucket')?.value.trim() || '';
-  if (s3Bucket !== (snap.storage_s3_bucket || '')) {
-    this.socket.emit('update-server-setting', { key: 'storage_s3_bucket', value: s3Bucket });
-    changed = true;
-  }
-
-  const s3Region = document.getElementById('storage-s3-region')?.value.trim() || 'auto';
-  if (s3Region !== (snap.storage_s3_region || 'auto')) {
-    this.socket.emit('update-server-setting', { key: 'storage_s3_region', value: s3Region });
-    changed = true;
-  }
-
-  const s3AccessKey = document.getElementById('storage-s3-access-key')?.value.trim() || '';
-  if (s3AccessKey) {
-    this.socket.emit('update-server-setting', { key: 'storage_s3_access_key', value: s3AccessKey });
-    changed = true;
-  }
-
-  const s3SecretKey = document.getElementById('storage-s3-secret-key')?.value.trim() || '';
-  if (s3SecretKey) {
-    this.socket.emit('update-server-setting', { key: 'storage_s3_secret_key', value: s3SecretKey });
-    changed = true;
-  }
-
-  const s3Prefix = document.getElementById('storage-s3-prefix')?.value.trim() || 'haven';
-  if (s3Prefix !== (snap.storage_s3_prefix || 'haven')) {
-    this.socket.emit('update-server-setting', { key: 'storage_s3_prefix', value: s3Prefix });
-    changed = true;
-  }
-
-  const s3ForcePathStyle = document.getElementById('storage-s3-force-path-style')?.checked ? 'true' : 'false';
-  if (s3ForcePathStyle !== (snap.storage_s3_force_path_style || 'true')) {
-    this.socket.emit('update-server-setting', { key: 'storage_s3_force_path_style', value: s3ForcePathStyle });
-    changed = true;
-  }
-
   const updateBannerAdminOnly = document.getElementById('update-banner-admin-only')?.checked ? 'true' : 'false';
   if (updateBannerAdminOnly !== (snap.update_banner_admin_only || 'false')) {
     this.socket.emit('update-server-setting', { key: 'update_banner_admin_only', value: updateBannerAdminOnly });
@@ -634,166 +580,12 @@ _cancelAdminSettings() {
     if (mpak) mpak.value = snap.max_proxy_avatar_kb || '256';
     const mpo = document.getElementById('max-poll-options');
     if (mpo) mpo.value = snap.max_poll_options || '10';
-    const sp = document.getElementById('storage-provider-select');
-    if (sp) sp.value = snap.storage_provider || 'local';
-    const se = document.getElementById('storage-s3-endpoint');
-    if (se) se.value = snap.storage_s3_endpoint || '';
-    const sb = document.getElementById('storage-s3-bucket');
-    if (sb) sb.value = snap.storage_s3_bucket || '';
-    const sr = document.getElementById('storage-s3-region');
-    if (sr) sr.value = snap.storage_s3_region || 'auto';
-    const sak = document.getElementById('storage-s3-access-key');
-    if (sak) sak.value = '';
-    const ssk = document.getElementById('storage-s3-secret-key');
-    if (ssk) ssk.value = '';
-    const spr = document.getElementById('storage-s3-prefix');
-    if (spr) spr.value = snap.storage_s3_prefix || 'haven';
-    const sps = document.getElementById('storage-s3-force-path-style');
-    if (sps) sps.checked = (snap.storage_s3_force_path_style || 'true') === 'true';
     const uba = document.getElementById('update-banner-admin-only');
     if (uba) uba.checked = snap.update_banner_admin_only === 'true';
     const dt = document.getElementById('default-theme-select');
     if (dt) dt.value = snap.default_theme || '';
   }
-  if (typeof this._refreshStorageAdminUI === 'function') this._refreshStorageAdminUI();
   document.getElementById('settings-modal').style.display = 'none';
-},
-
-_refreshStorageAdminUI() {
-  const provider = document.getElementById('storage-provider-select')?.value || this.serverSettings.storage_provider || 'local';
-  const s3Wrap = document.getElementById('storage-s3-settings');
-  if (s3Wrap) s3Wrap.style.display = provider === 's3' ? '' : 'none';
-  const note = document.getElementById('storage-status-note');
-  if (note) {
-    const pending = this._storageStatus?.pendingRestore;
-    const bucket = document.getElementById('storage-s3-bucket')?.value.trim() || this.serverSettings.storage_s3_bucket || '';
-    const prefix = document.getElementById('storage-s3-prefix')?.value.trim() || this.serverSettings.storage_s3_prefix || 'haven';
-    note.textContent = provider === 's3'
-      ? `Active volume: S3 / MEGA S4${bucket ? ` (${bucket}${prefix ? ` / ${prefix}` : ''})` : ''}${pending ? ' • Restore staged, restart required' : ''}`
-      : `Active volume: local /data/uploads${pending ? ' • Restore staged, restart required' : ''}`;
-  }
-},
-
-_getStorageFormPayload() {
-  return {
-    endpoint: document.getElementById('storage-s3-endpoint')?.value.trim() || '',
-    bucket: document.getElementById('storage-s3-bucket')?.value.trim() || '',
-    region: document.getElementById('storage-s3-region')?.value.trim() || 'auto',
-    accessKeyId: document.getElementById('storage-s3-access-key')?.value.trim() || '',
-    secretAccessKey: document.getElementById('storage-s3-secret-key')?.value.trim() || '',
-    prefix: document.getElementById('storage-s3-prefix')?.value.trim() || 'haven',
-    forcePathStyle: !!document.getElementById('storage-s3-force-path-style')?.checked
-  };
-},
-
-async _testStorageConnection() {
-  try {
-    const res = await fetch('/api/admin/storage/test', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(this._getStorageFormPayload())
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Connection test failed');
-    this._showToast('S3 connection succeeded', 'success');
-  } catch (err) {
-    this._showToast(err.message || 'Connection test failed', 'error');
-  }
-},
-
-async _runStorageMigration() {
-  const provider = document.getElementById('storage-provider-select')?.value || 'local';
-  if (provider !== 's3') {
-    this._showToast('Switch the active upload volume to S3 first, then save settings.', 'info');
-    return;
-  }
-  if (!confirm('Move current local uploads into the active S3 volume now? Existing local copies will be removed after upload.')) return;
-
-  try {
-    const res = await fetch('/api/admin/storage/migrate', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${this.token}` }
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Migration failed');
-    this._showToast(`Moved ${data.migrated || 0} uploads and ${data.deletedAttachmentsMigrated || 0} deleted attachments`, 'success');
-  } catch (err) {
-    this._showToast(err.message || 'Migration failed', 'error');
-  }
-},
-
-async _downloadActiveDataBackup() {
-  try {
-    const res = await fetch('/api/admin/volume/backup', {
-      headers: { 'Authorization': `Bearer ${this.token}` }
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || 'Backup download failed');
-    }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `haven-data-backup-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.zip`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-  } catch (err) {
-    this._showToast(err.message || 'Backup download failed', 'error');
-  }
-},
-
-async _importDataBackup(file) {
-  if (!file) return;
-  const formData = new FormData();
-  formData.append('file', file);
-  try {
-    const res = await fetch('/api/admin/volume/import', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${this.token}` },
-      body: formData
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Import failed');
-    this._storageStatus = { pendingRestore: !!data.restartRequired };
-    this._refreshStorageAdminUI();
-    this._showToast(data.message || 'Backup import staged', 'success');
-  } catch (err) {
-    this._showToast(err.message || 'Import failed', 'error');
-  }
-},
-
-_setupStorageAdmin() {
-  document.getElementById('storage-provider-select')?.addEventListener('change', () => this._refreshStorageAdminUI());
-  ['storage-s3-bucket', 'storage-s3-prefix'].forEach((id) => {
-    document.getElementById(id)?.addEventListener('input', () => this._refreshStorageAdminUI());
-  });
-  document.getElementById('storage-test-btn')?.addEventListener('click', () => this._testStorageConnection());
-  document.getElementById('storage-migrate-btn')?.addEventListener('click', () => this._runStorageMigration());
-  document.getElementById('data-backup-btn')?.addEventListener('click', () => this._downloadActiveDataBackup());
-  document.getElementById('data-import-btn')?.addEventListener('click', () => {
-    document.getElementById('data-import-file')?.click();
-  });
-  document.getElementById('data-import-file')?.addEventListener('change', (e) => {
-    const file = e.target?.files?.[0];
-    if (file) this._importDataBackup(file);
-    e.target.value = '';
-  });
-
-  fetch('/api/admin/storage/status', {
-    headers: { 'Authorization': `Bearer ${this.token}` }
-  }).then(r => r.json()).then((data) => {
-    this._storageStatus = data || {};
-    this._refreshStorageAdminUI();
-  }).catch(() => {
-    this._storageStatus = { pendingRestore: false };
-    this._refreshStorageAdminUI();
-  });
 },
 
 _renderWhitelist(list) {
@@ -2612,31 +2404,8 @@ _renderRoleDetail() {
     return;
   }
 
-  const allPerms = [
-    'edit_own_messages', 'delete_own_messages', 'delete_message', 'delete_lower_messages',
-    'pin_message', 'archive_messages', 'kick_user', 'mute_user', 'ban_user',
-    'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
-    'create_channel', 'create_forum_posts', 'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-    'view_all_members', 'manage_emojis', 'manage_soundboard', 'promote_user', 'transfer_admin',
-    'manage_roles', 'manage_server', 'delete_channel'
-  ];
-  const permLabels = {
-    edit_own_messages: 'Edit Own Messages', delete_own_messages: 'Delete Own Messages',
-    delete_message: 'Delete Any Message', delete_lower_messages: 'Delete Lower-level Messages',
-    pin_message: 'Pin Messages', archive_messages: 'Protect Messages',
-    kick_user: 'Kick Users', mute_user: 'Mute Users', ban_user: 'Ban Users',
-    rename_channel: 'Rename Channels', rename_sub_channel: 'Rename Sub-channels',
-    set_channel_topic: 'Set Channel Topic', manage_sub_channels: 'Manage Sub-channels',
-    create_channel: 'Create Channels', create_forum_posts: 'Create Forum Posts',
-    upload_files: 'Upload Files', use_voice: 'Use Voice Chat',
-    manage_webhooks: 'Manage Webhooks', mention_everyone: 'Mention @everyone',
-    view_history: 'View Message History',
-    view_all_members: 'View All Server Members',
-    manage_emojis: 'Manage Custom Emojis',
-    manage_soundboard: 'Manage Soundboard',
-    promote_user: 'Promote Users', transfer_admin: 'Transfer Admin',
-    manage_roles: 'Manage Roles', manage_server: 'Manage Server', delete_channel: 'Delete Channels'
-  };
+  const allPerms = ALL_PERMS;
+  const permLabels = PERM_LABELS;
   const rolePerms = role.permissions || [];
 
   panel.innerHTML = `
@@ -3029,31 +2798,8 @@ _renderChannelRolesRoleDetail() {
     return;
   }
 
-  const allPerms = [
-    'edit_own_messages', 'delete_own_messages', 'delete_message', 'delete_lower_messages',
-    'pin_message', 'archive_messages', 'kick_user', 'mute_user', 'ban_user',
-    'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
-    'create_channel', 'create_forum_posts', 'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-    'view_all_members', 'manage_emojis', 'manage_soundboard', 'promote_user', 'transfer_admin',
-    'manage_roles', 'manage_server', 'delete_channel'
-  ];
-  const permLabels = {
-    edit_own_messages: 'Edit Own Messages', delete_own_messages: 'Delete Own Messages',
-    delete_message: 'Delete Any Message', delete_lower_messages: 'Delete Lower-level Messages',
-    pin_message: 'Pin Messages', archive_messages: 'Protect Messages',
-    kick_user: 'Kick Users', mute_user: 'Mute Users', ban_user: 'Ban Users',
-    rename_channel: 'Rename Channels', rename_sub_channel: 'Rename Sub-channels',
-    set_channel_topic: 'Set Channel Topic', manage_sub_channels: 'Manage Sub-channels',
-    create_channel: 'Create Channels', create_forum_posts: 'Create Forum Posts',
-    upload_files: 'Upload Files', use_voice: 'Use Voice Chat',
-    manage_webhooks: 'Manage Webhooks', mention_everyone: 'Mention @everyone',
-    view_history: 'View Message History',
-    view_all_members: 'View All Server Members',
-    manage_emojis: 'Manage Custom Emojis',
-    manage_soundboard: 'Manage Soundboard',
-    promote_user: 'Promote Users', transfer_admin: 'Transfer Admin',
-    manage_roles: 'Manage Roles', manage_server: 'Manage Server', delete_channel: 'Delete Channels'
-  };
+  const allPerms = ALL_PERMS;
+  const permLabels = PERM_LABELS;
   const rolePerms = role.permissions || [];
 
   panel.innerHTML = `
@@ -3429,34 +3175,11 @@ _renderRacConfig() {
   // Determine which permissions the caller can grant
   const callerPerms = this._racData.callerPerms || [];
   const callerIsAdmin = this._racData.callerIsAdmin;
-  const allPerms = [
-    'edit_own_messages', 'delete_own_messages', 'delete_message', 'delete_lower_messages',
-    'pin_message', 'archive_messages', 'kick_user', 'mute_user', 'ban_user',
-    'rename_channel', 'rename_sub_channel', 'set_channel_topic', 'manage_sub_channels',
-    'create_channel', 'create_forum_posts', 'upload_files', 'use_voice', 'manage_webhooks', 'mention_everyone', 'view_history',
-    'view_all_members', 'manage_emojis', 'manage_soundboard', 'promote_user', 'transfer_admin',
-    'manage_roles', 'manage_server', 'delete_channel'
-  ];
+  const allPerms = ALL_PERMS;
   // Perms that only admin can grant
   const adminOnlyPerms = ['transfer_admin', 'manage_roles', 'manage_server', 'delete_channel'];
   // Perms that require the caller to have them to be able to grant
-  const permLabels = {
-    edit_own_messages: 'Edit Own Messages', delete_own_messages: 'Delete Own Messages',
-    delete_message: 'Delete Any Message', delete_lower_messages: 'Delete Lower Messages',
-    pin_message: 'Pin Messages', archive_messages: 'Protect Messages',
-    kick_user: 'Kick Users', mute_user: 'Mute Users',
-    ban_user: 'Ban Users', rename_channel: 'Rename Channels',
-    rename_sub_channel: 'Rename Sub-channels', set_channel_topic: 'Set Topic',
-    manage_sub_channels: 'Manage Sub-channels', create_channel: 'Create Channels', create_forum_posts: 'Create Forum Posts',
-    upload_files: 'Upload Files',
-    use_voice: 'Use Voice', manage_webhooks: 'Manage Webhooks',
-    mention_everyone: 'Mention Everyone', view_history: 'View History',
-    view_all_members: 'View All Members',
-    manage_emojis: 'Manage Custom Emojis',
-    manage_soundboard: 'Manage Soundboard',
-    promote_user: 'Promote Users', transfer_admin: 'Transfer Admin',
-    manage_roles: 'Manage Roles', manage_server: 'Manage Server', delete_channel: 'Delete Channels'
-  };
+  const permLabels = PERM_LABELS;
 
   // If a role preset is selected, get its permissions
   const selectedRoleObj = availableRoles.find(r => r.id === Number(selectedRoleId));
