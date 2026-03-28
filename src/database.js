@@ -67,6 +67,7 @@ function initDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       code TEXT UNIQUE NOT NULL,
+      server_id INTEGER DEFAULT NULL REFERENCES servers(id) ON DELETE CASCADE,
       created_by INTEGER REFERENCES users(id),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -119,6 +120,16 @@ function initDatabase() {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS servers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      code TEXT UNIQUE NOT NULL,
+      icon_url TEXT DEFAULT '',
+      created_by INTEGER REFERENCES users(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      position INTEGER DEFAULT 0
+    );
+
     CREATE TABLE IF NOT EXISTS user_preferences (
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       key TEXT NOT NULL,
@@ -139,6 +150,8 @@ function initDatabase() {
       ON messages(channel_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_channel_code
       ON channels(code);
+    CREATE INDEX IF NOT EXISTS idx_channels_server_id
+      ON channels(server_id);
     CREATE INDEX IF NOT EXISTS idx_reactions_message
       ON reactions(message_id);
     CREATE INDEX IF NOT EXISTS idx_bans_user
@@ -167,6 +180,12 @@ function initDatabase() {
     db.prepare("SELECT edited_at FROM messages LIMIT 0").get();
   } catch {
     db.exec("ALTER TABLE messages ADD COLUMN edited_at DATETIME DEFAULT NULL");
+  }
+
+  try {
+    db.prepare("SELECT server_id FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN server_id INTEGER DEFAULT NULL REFERENCES servers(id) ON DELETE CASCADE");
   }
 
   // ── Migration: high_scores table ────────────────────────
@@ -210,6 +229,24 @@ function initDatabase() {
   insertSetting.run('max_proxy_avatar_kb', '256');
   insertSetting.run('setup_wizard_complete', 'false');   // first-time admin setup wizard
   insertSetting.run('update_banner_admin_only', 'false'); // hide update banner from non-admins
+
+  function generateServerCode() {
+    let code;
+    do {
+      code = Math.random().toString(16).slice(2, 10).padEnd(8, '0').slice(0, 8);
+    } while (db.prepare('SELECT 1 FROM servers WHERE code = ?').get(code));
+    return code;
+  }
+
+  const mainServer = db.prepare("SELECT id FROM servers WHERE name = 'Main' ORDER BY id LIMIT 1").get();
+  const mainServerId = mainServer?.id || (() => {
+    const result = db.prepare(
+      'INSERT INTO servers (name, code, icon_url, created_by, position) VALUES (?, ?, ?, NULL, 0)'
+    ).run('Main', generateServerCode(), '');
+    return result.lastInsertRowid;
+  })();
+
+  db.prepare('UPDATE channels SET server_id = ? WHERE is_dm = 0 AND server_id IS NULL').run(mainServerId);
 
   // ── Migration: pinned_messages table ──────────────────
   db.exec(`
