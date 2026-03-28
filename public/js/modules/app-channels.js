@@ -216,6 +216,7 @@ _renderForumBrowser() {
       <article class="forum-card" data-code="${this._escapeHtml(post.code)}">
         <div class="forum-card-header">
           <h4 class="forum-card-title">${this._escapeHtml(post.name)}</h4>
+          ${post.unreadCount > 0 ? `<span class="forum-card-tag" title="Unread replies in this forum post">🔔 ${post.unreadCount > 99 ? '99+' : post.unreadCount}</span>` : ''}
           ${(post.tag || '') ? `<span class="forum-card-tag">${this._escapeHtml(post.tag)}</span>` : ''}
         </div>
         <div class="forum-card-preview">${this._escapeHtml(post.preview || 'No original post yet.')}</div>
@@ -1323,10 +1324,11 @@ _renderChannels() {
 
   const regularChannels = this.channels.filter(c => !c.is_dm && c.server_id === this.currentServerId);
   const dmChannels = this.channels.filter(c => c.is_dm);
+  const showingDms = this.sidebarView === 'dms';
 
   if (this.currentChannel) {
     const current = this.channels.find(c => c.code === this.currentChannel);
-    if (current && !current.is_dm && current.server_id !== this.currentServerId) {
+    if (current && !showingDms && !current.is_dm && current.server_id !== this.currentServerId) {
       const fallback = regularChannels[0];
       if (fallback) {
         this.currentChannel = fallback.code;
@@ -1346,7 +1348,33 @@ _renderChannels() {
 
   // Show/hide sub-channel panel button based on whether sub-channels exist
   const subPanelBtn = document.getElementById('sub-channel-panel-btn');
-  if (subPanelBtn) subPanelBtn.style.display = Object.keys(subChannelMap).length > 0 ? '' : 'none';
+  if (subPanelBtn) subPanelBtn.style.display = !showingDms && Object.keys(subChannelMap).length > 0 ? '' : 'none';
+  const channelsToggle = document.getElementById('channels-toggle');
+  if (channelsToggle) {
+    const label = channelsToggle.querySelector('.section-label-text');
+    if (label) label.textContent = showingDms ? 'Direct Messages' : 'Channels';
+  }
+  if (showingDms) {
+    dmChannels.forEach(ch => {
+      const el = document.createElement('div');
+      el.className = 'channel-item dm-item' + (ch.code === this.currentChannel ? ' active' : '');
+      el.dataset.code = ch.code;
+      const dmName = ch.dm_target ? this._getNickname(ch.dm_target.id, ch.dm_target.username) : 'Unknown';
+      el.innerHTML = `<span class="channel-hash">@</span><span class="channel-name">${this._escapeHtml(dmName)}</span>`;
+      const count = (ch.code in this.unreadCounts) ? this.unreadCounts[ch.code] : (ch.unreadCount || 0);
+      if (count > 0) {
+        const bdg = document.createElement('span');
+        bdg.className = 'channel-badge';
+        bdg.textContent = count > 99 ? '99+' : count;
+        el.appendChild(bdg);
+      }
+      el.addEventListener('click', () => this.switchChannel(ch.code));
+      list.appendChild(el);
+    });
+    const dmPane = document.getElementById('dm-pane');
+    if (dmPane) dmPane.style.display = 'none';
+    return;
+  }
 
   // Sort sub-channels — respect parent's sort_alphabetical setting & per-tag overrides
   // sort_alphabetical: 0=manual, 1=alpha, 2=created, 3=oldest
@@ -1982,7 +2010,7 @@ _updateBadge(code) {
 _updateTabTitle() {
   const validCodes = new Set((this.channels || []).map(c => c.code));
   const total = Object.entries(this.unreadCounts).reduce((s, [k, v]) => validCodes.has(k) ? s + v : s, 0);
-  document.title = total > 0 ? `(${total}) Haven` : 'Haven';
+  document.title = total > 0 ? `(${total}) Sanctuary` : 'Sanctuary';
 },
 
 _updateDesktopBadge() {
