@@ -1766,6 +1766,7 @@ _setupUI() {
 
   // ── Settings popout modal ────────────────────────────
   const openSettingsModal = () => {
+    this._prepareSettingsLayout?.();
     this._snapshotAdminSettings();
     document.getElementById('settings-modal').style.display = 'flex';
     this._syncSettingsNav();
@@ -1816,6 +1817,17 @@ _setupUI() {
       document.querySelectorAll('.settings-nav-item').forEach(n => n.classList.remove('active'));
       item.classList.add('active');
     });
+  });
+  document.getElementById('settings-nav')?.addEventListener('click', (e) => {
+    const item = e.target.closest('.settings-nav-item');
+    if (!item) return;
+    const targetId = item.dataset.target;
+    const target = document.getElementById(targetId);
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.querySelectorAll('.settings-nav-item').forEach(n => n.classList.remove('active'));
+    item.classList.add('active');
+    if (targetId === 'section-data-monitoring') this._loadDataMonitoring?.();
   });
 
   // ── Password change ──────────────────────────────────
@@ -3576,8 +3588,22 @@ _getCurrentServerMeta() {
   return (this.servers || []).find(s => s.id === this.currentServerId) || this.servers?.[0] || null;
 },
 
+_applyThemePreferenceStack() {
+  const hasUserOverride = localStorage.getItem('haven_user_theme_override') === '1' || !!this.preferences?.theme;
+  if (hasUserOverride) return;
+  const selectedServer = this._getCurrentServerMeta?.();
+  if (selectedServer?.theme) {
+    applyThemeFromServer(selectedServer.theme);
+    return;
+  }
+  if (this.serverSettings?.default_theme) {
+    applyThemeFromServer(this.serverSettings.default_theme);
+  }
+},
+
 _selectServer(serverId) {
   if (!serverId) return;
+  this.sidebarView = 'servers';
   this.currentServerId = serverId;
   const currentInServer = this.channels.find(c => c.code === this.currentChannel && !c.is_dm && c.server_id === serverId);
   if (!currentInServer) {
@@ -3587,6 +3613,7 @@ _selectServer(serverId) {
   this._renderServerBar();
   this._renderChannels();
   this._refreshSelectedServerSettings();
+  this._applyThemePreferenceStack();
 },
 
 _openServerEditor(server = null) {
@@ -3611,8 +3638,10 @@ _refreshSelectedServerSettings() {
   const preview = document.getElementById('subserver-icon-preview');
   const codeValue = document.getElementById('server-code-value');
   const label = document.getElementById('selected-server-settings-name');
+  const themeSelect = document.getElementById('subserver-theme-select');
   if (label) label.textContent = server?.name || 'No server selected';
   if (nameInput) nameInput.value = server?.name || '';
+  if (themeSelect) themeSelect.value = server?.theme || '';
   if (codeValue) codeValue.textContent = server?.code || '—';
   if (preview) {
     preview.innerHTML = server?.icon_url
@@ -3623,6 +3652,14 @@ _refreshSelectedServerSettings() {
 
 _setupServerBar() {
   this._renderServerBar();
+
+  document.getElementById('dm-server-bubble')?.addEventListener('click', () => {
+    this.sidebarView = 'dms';
+    const firstDm = this.channels.find(c => c.is_dm);
+    if (firstDm) this.switchChannel(firstDm.code);
+    this._renderServerBar();
+    this._renderChannels();
+  });
 
   document.getElementById('home-server')?.addEventListener('click', () => {
     const main = (this.servers || []).find(s => s.name === 'Main') || this.servers?.[0];
@@ -3745,8 +3782,10 @@ _renderServerBar() {
   const servers = (this.servers || []).filter(s => s.name !== 'Main');
   const main = (this.servers || []).find(s => s.name === 'Main') || this.servers?.[0];
   const home = document.getElementById('home-server');
+  const dmBubble = document.getElementById('dm-server-bubble');
+  if (dmBubble) dmBubble.classList.toggle('active', this.sidebarView === 'dms');
   if (home) {
-    home.classList.toggle('active', !!main && this.currentServerId === main.id);
+    home.classList.toggle('active', this.sidebarView !== 'dms' && !!main && this.currentServerId === main.id);
     home.title = main ? `${main.name}` : 'Main';
     const text = home.querySelector('.server-icon-text');
     if (text) text.textContent = main?.name?.charAt(0)?.toUpperCase() || 'M';
@@ -3813,6 +3852,137 @@ _setupMobileSidebarServers() {
   if (mobileAdd) {
     mobileAdd.style.display = (this.user?.isAdmin || this._hasPerm('create_server')) ? '' : 'none';
     mobileAdd.addEventListener('click', () => this._openServerEditor());
+  }
+},
+
+_prepareSettingsLayout() {
+  const storageNav = document.querySelector('.settings-nav-item[data-target="section-storage"]');
+  if (storageNav) storageNav.textContent = 'Upload Storage';
+
+  const logoutBtn = document.getElementById('settings-logout-btn');
+  const settingsBody = document.querySelector('#settings-modal .settings-body');
+  const settingsNav = document.getElementById('settings-nav');
+  const adminGroup = settingsNav?.querySelector('.settings-nav-group.settings-nav-admin');
+  if (settingsBody && settingsNav && !document.getElementById('section-session-user')) {
+    const navItem = document.createElement('div');
+    navItem.className = 'settings-nav-item';
+    navItem.dataset.target = 'section-session-user';
+    navItem.textContent = 'Logout';
+    settingsNav.insertBefore(navItem, adminGroup || null);
+
+    const section = document.createElement('div');
+    section.className = 'settings-section';
+    section.id = 'section-session-user';
+    section.innerHTML = `
+      <h5 class="settings-section-title">💀 Logout</h5>
+      <p class="settings-hint" style="margin-bottom:8px;">Log out before switching to another instance.</p>
+      <button class="btn-sm btn-full" id="settings-logout-btn-clone">Logout</button>
+    `;
+    settingsBody.insertBefore(section, document.getElementById('admin-mod-panel'));
+    section.querySelector('#settings-logout-btn-clone')?.addEventListener('click', () => logoutBtn?.click());
+  }
+
+  if (settingsNav && !document.querySelector('.settings-nav-item[data-target="section-server-customization"]')) {
+    const serverGroup = document.createElement('div');
+    serverGroup.className = 'settings-nav-group';
+    serverGroup.textContent = 'Server';
+    const customization = document.createElement('div');
+    customization.className = 'settings-nav-item';
+    customization.dataset.target = 'section-server-customization';
+    customization.textContent = 'Customization';
+    const channels = document.createElement('div');
+    channels.className = 'settings-nav-item';
+    channels.dataset.target = 'section-server-channels';
+    channels.textContent = 'Channels';
+    settingsNav.insertBefore(serverGroup, adminGroup || null);
+    settingsNav.insertBefore(customization, adminGroup || null);
+    settingsNav.insertBefore(channels, adminGroup || null);
+  }
+
+  const subserverSection = document.getElementById('section-subserver');
+  if (subserverSection && subserverSection.id !== 'section-server-customization') {
+    subserverSection.id = 'section-server-customization';
+    const title = subserverSection.querySelector('.settings-section-subtitle');
+    if (title) title.textContent = 'Selected Server';
+    if (!document.getElementById('subserver-theme-select')) {
+      const label = document.createElement('label');
+      label.className = 'select-row';
+      label.style.marginTop = '8px';
+      label.innerHTML = `
+        <span>Server Theme</span>
+        <select id="subserver-theme-select" style="max-width:180px">
+          <option value="">Use Instance Default</option>
+          <option value="haven">Haven</option>
+          <option value="discord">Discord</option>
+          <option value="matrix">Matrix</option>
+          <option value="fallout">Fallout</option>
+          <option value="ffx">Final Fantasy</option>
+          <option value="ice">Ice</option>
+          <option value="nord">Nord</option>
+          <option value="darksouls">Dark Souls</option>
+          <option value="eldenring">Elden Ring</option>
+          <option value="bloodborne">Bloodborne</option>
+          <option value="cyberpunk">Cyberpunk</option>
+          <option value="lotr">Lord of the Rings</option>
+          <option value="abyss">Abyss</option>
+          <option value="scripture">Scripture</option>
+          <option value="chapel">Chapel</option>
+          <option value="gospel">Gospel</option>
+          <option value="tron">Tron</option>
+          <option value="halo">Halo</option>
+          <option value="dracula">Dracula</option>
+          <option value="win95">Windows 95</option>
+        </select>
+      `;
+      subserverSection.insertBefore(label, subserverSection.querySelector('.server-icon-upload-area'));
+    }
+  }
+
+  if (settingsBody && !document.getElementById('section-server-channels')) {
+    const section = document.createElement('div');
+    section.className = 'admin-settings';
+    section.id = 'section-server-channels';
+    section.style.cssText = 'margin-top:10px;padding-top:10px;border-top:1px solid var(--border);';
+    section.innerHTML = `
+      <h5 class="settings-section-subtitle">Channels</h5>
+      <small class="settings-hint">Create and organize channels for the selected server here.</small>
+      <div id="server-channels-settings-slot" style="margin-top:8px;"></div>
+      <button class="btn-sm btn-full" id="server-organize-channels-btn" style="margin-top:8px">Open Channel Organizer</button>
+    `;
+    const invite = document.getElementById('section-invite');
+    settingsBody.querySelector('#admin-mod-panel')?.insertBefore(section, invite || null);
+    const adminControls = document.getElementById('admin-controls');
+    if (adminControls) {
+      adminControls.style.display = 'none';
+      const body = adminControls.querySelector('.collapsible-section-body');
+      const slot = section.querySelector('#server-channels-settings-slot');
+      if (body && slot && !slot.children.length) {
+        slot.appendChild(body.cloneNode(true));
+        slot.querySelector('#create-channel-btn')?.addEventListener('click', () => document.getElementById('create-channel-btn')?.click());
+      }
+    }
+    section.querySelector('#server-organize-channels-btn')?.addEventListener('click', () => document.getElementById('organize-channels-btn')?.click());
+  }
+
+  if (settingsBody && !document.getElementById('section-data-monitoring')) {
+    const section = document.createElement('div');
+    section.className = 'admin-settings';
+    section.id = 'section-data-monitoring';
+    section.style.cssText = 'margin-top:10px;padding-top:10px;border-top:1px solid var(--border);';
+    section.innerHTML = `
+      <h5 class="settings-section-subtitle">Data Monitoring</h5>
+      <div id="data-monitoring-list" style="margin-top:8px"><p class="muted-text">Loading data usage...</p></div>
+    `;
+    settingsBody.querySelector('#admin-mod-panel')?.insertBefore(section, document.getElementById('section-uploads') || null);
+  }
+
+  if (settingsNav && !document.querySelector('.settings-nav-item[data-target="section-data-monitoring"]')) {
+    const navItem = document.createElement('div');
+    navItem.className = 'settings-nav-item settings-nav-admin';
+    navItem.dataset.target = 'section-data-monitoring';
+    navItem.style.display = 'none';
+    navItem.textContent = 'Data Monitoring';
+    settingsNav.insertBefore(navItem, document.querySelector('.settings-nav-item[data-target="section-uploads"]'));
   }
 },
 
