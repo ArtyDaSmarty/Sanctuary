@@ -808,7 +808,7 @@ _openReparentModal(code) {
 _openOrganizeModal(parentCode, serverLevel) {
   if (serverLevel) {
     // Server-level mode: organize top-level channels
-    const parents = this.channels.filter(c => !c.parent_channel_id && !c.is_dm);
+    const parents = this.channels.filter(c => !c.parent_channel_id && !c.is_dm && c.server_id === this.currentServerId);
     this._organizeParentCode = '__server__';
     this._organizeParentId = null;
     this._organizeServerLevel = true;
@@ -977,7 +977,7 @@ _renderOrganizeList() {
       const sel = this._organizeSelected === ch.code;
       const tagBadge = ch.category ? `<span class="organize-tag-badge">${this._escapeHtml(ch.category)}</span>` : '';
       const icon = this._organizeServerLevel ? '#' : (ch.is_private ? '🔒' : '↳');
-      const hasSubs = this._organizeServerLevel && this.channels.some(c => c.parent_channel_id === ch.id);
+      const hasSubs = this._organizeServerLevel && this.channels.some(c => c.parent_channel_id === ch.id && c.server_id === this.currentServerId);
       const drillHint = hasSubs ? `<span class="organize-drill-hint" title="Double-click to organize sub-channels">▶</span>` : '';
       html += `<div class="organize-item${sel ? ' selected' : ''}${hasSubs ? ' organize-has-subs' : ''}" data-code="${ch.code}">
         <span style="opacity:0.5">${icon}</span>
@@ -1007,7 +1007,7 @@ _renderOrganizeList() {
       el.addEventListener('dblclick', () => {
         const ch = this.channels.find(c => c.code === el.dataset.code);
         if (!ch) return;
-        const hasSubs = this.channels.some(c => c.parent_channel_id === ch.id);
+        const hasSubs = this.channels.some(c => c.parent_channel_id === ch.id && c.server_id === this.currentServerId);
         if (hasSubs) this._openOrganizeModal(ch.code);
       });
     }
