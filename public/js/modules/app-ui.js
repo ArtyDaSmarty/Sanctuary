@@ -4000,6 +4000,7 @@ _prepareSettingsLayout() {
       <div id="server-channels-settings-slot" style="margin-top:8px;"></div>
       <button class="btn-sm btn-full" id="server-organize-channels-btn" style="margin-top:8px">Open Channel Organizer</button>
     `;
+    settingsBody.insertBefore(serverChannelsSection, adminPanel || null);
   } else if (serverChannelsSection) {
     serverChannelsSection.className = 'settings-section';
     serverChannelsSection.style.cssText = '';
@@ -4012,6 +4013,7 @@ _prepareSettingsLayout() {
       createBody.classList.remove('collapsed');
       createBody.style.maxHeight = '';
       createBody.style.opacity = '';
+      createBody.style.display = 'block';
       createBody.style.marginTop = '';
       createBody.style.marginBottom = '';
       slot.replaceChildren(createBody);
