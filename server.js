@@ -9,6 +9,7 @@ const {
   addDirectoryToZip,
   appendActiveUploadsToZip,
   applyPendingRestoreIfPresent,
+  clearStorageSettings,
   cleanupActiveUploads,
   deleteUploadByName,
   generateStoredFilename,
@@ -632,11 +633,19 @@ function getAdminFromRequest(req) {
 function buildStorageStatusPayload() {
   const config = getStorageConfig();
   const pendingRestore = getPendingRestoreInfo();
+  const configured = config.provider === 's3'
+    && !!config.s3.endpoint
+    && !!config.s3.bucket
+    && !!config.s3.accessKeyId
+    && !!config.s3.secretAccessKey;
   return {
     provider: config.provider,
+    configured,
     bucket: config.s3.bucket,
     endpoint: config.s3.endpoint,
+    region: config.s3.region,
     prefix: config.s3.prefix,
+    forcePathStyle: !!config.s3.forcePathStyle,
     pendingRestore: pendingRestore.pending
   };
 }
@@ -644,6 +653,54 @@ function buildStorageStatusPayload() {
 app.get('/api/admin/storage/status', (req, res) => {
   if (!getAdminFromRequest(req)) return res.status(403).json({ error: 'Admin only' });
   res.json(buildStorageStatusPayload());
+});
+
+app.post('/api/admin/storage/configure', express.json(), async (req, res) => {
+  if (!getAdminFromRequest(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    const body = req.body || {};
+    const provider = body.provider === 's3' ? 's3' : 'local';
+
+    if (provider === 'local') {
+      clearStorageSettings();
+      return res.json({ ok: true, ...buildStorageStatusPayload() });
+    }
+
+    const payload = {
+      endpoint: String(body.endpoint || '').trim(),
+      region: String(body.region || 'auto').trim() || 'auto',
+      bucket: String(body.bucket || '').trim(),
+      accessKeyId: String(body.accessKeyId || '').trim(),
+      secretAccessKey: String(body.secretAccessKey || '').trim(),
+      prefix: String(body.prefix || 'haven').trim(),
+      forcePathStyle: body.forcePathStyle !== false
+    };
+    await testS3Connection(payload);
+
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_provider', 's3');
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_s3_endpoint', payload.endpoint);
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_s3_region', payload.region);
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_s3_bucket', payload.bucket);
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_s3_prefix', payload.prefix || 'haven');
+    db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)').run('storage_s3_force_path_style', payload.forcePathStyle ? 'true' : 'false');
+    const { setSecureSetting } = require('./src/storage');
+    setSecureSetting('storage_s3_access_key', payload.accessKeyId);
+    setSecureSetting('storage_s3_secret_key', payload.secretAccessKey);
+
+    res.json({ ok: true, ...buildStorageStatusPayload() });
+  } catch (err) {
+    res.status(400).json({ error: err?.message || 'Failed to save storage settings' });
+  }
+});
+
+app.post('/api/admin/storage/disconnect', express.json(), (req, res) => {
+  if (!getAdminFromRequest(req)) return res.status(403).json({ error: 'Admin only' });
+  try {
+    clearStorageSettings();
+    res.json({ ok: true, ...buildStorageStatusPayload() });
+  } catch (err) {
+    res.status(500).json({ error: err?.message || 'Disconnect failed' });
+  }
 });
 
 app.post('/api/admin/storage/test', express.json(), async (req, res) => {
