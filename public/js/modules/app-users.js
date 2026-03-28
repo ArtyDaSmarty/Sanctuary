@@ -90,6 +90,7 @@ _showUserGearMenu(anchorEl, userId, username) {
   if (canPromote) items += `<button class="gear-menu-item" data-action="assign-role">👑 Assign Role</button>`;
   if (canMod) items += `<button class="gear-menu-item" data-action="kick">👢 Kick</button>`;
   if (canMod) items += `<button class="gear-menu-item" data-action="mute">🔇 Mute</button>`;
+  if (isAdmin) items += `<button class="gear-menu-item" data-action="reset-password">🔑 Reset Password</button>`;
   if (isAdmin) items += `<button class="gear-menu-item gear-menu-danger" data-action="ban">⛔ Ban</button>`;
   if (isAdmin) items += `<button class="gear-menu-item gear-menu-danger" data-action="delete-user">🗑️ Delete User</button>`;
   if (isAdmin) items += `<div class="gear-menu-divider"></div><button class="gear-menu-item gear-menu-danger" data-action="transfer-admin">🔑 Transfer Admin</button>`;
@@ -120,6 +121,8 @@ _showUserGearMenu(anchorEl, userId, username) {
       this._closeUserGearMenu();
       if (action === 'assign-role') {
         this._openRoleAssignCenter(userId);
+      } else if (action === 'reset-password') {
+        this._promptAdminPasswordReset(userId, username);
       } else if (action === 'transfer-admin') {
         this._confirmTransferAdmin(userId, username);
       } else {
@@ -135,6 +138,26 @@ _showUserGearMenu(anchorEl, userId, username) {
     };
     document.addEventListener('click', this._gearMenuOutsideHandler, true);
   }, 10);
+}, 
+
+async _promptAdminPasswordReset(userId, username) {
+  const newPassword = prompt(`Set a new password for ${username}. Minimum 8 characters.`);
+  if (!newPassword) return;
+  try {
+    const res = await fetch('/api/auth/admin/reset-password', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ userId, newPassword })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to reset password');
+    this._showToast(`Password reset for ${username}`, 'success');
+  } catch (err) {
+    this._showToast(err.message || 'Failed to reset password', 'error');
+  }
 },
 
 _closeUserGearMenu() {
@@ -886,6 +909,7 @@ _renderProxySettings() {
           <div class="proxy-settings-copy">
             <div class="proxy-settings-name-row">
               <strong>${this._escapeHtml(proxy.name)}</strong>
+              <span class="proxy-visibility-badge">${proxy.proxyType === 'character' ? 'CHARACTER' : 'ALTER'}</span>
               <span class="proxy-visibility-badge">${proxy.isPublic ? 'Public' : 'Private'}</span>
             </div>
             <div class="proxy-settings-trigger"><code>${this._escapeHtml(proxy.triggerPrefix)}message${this._escapeHtml(proxy.triggerSuffix || '')}</code></div>
@@ -936,6 +960,21 @@ _openProxyEditor(proxy = null) {
   document.getElementById('proxy-group-input').value = proxy?.groupName || '';
   document.getElementById('proxy-bio-input').value = proxy?.bio || '';
   document.getElementById('proxy-public-input').checked = proxy ? !!proxy.isPublic : true;
+  let typeSelect = document.getElementById('proxy-type-input');
+  if (!typeSelect) {
+    const group = document.createElement('div');
+    group.className = 'form-group';
+    group.innerHTML = `
+      <label>Tag</label>
+      <select id="proxy-type-input">
+        <option value="alter">ALTER</option>
+        <option value="character">CHARACTER</option>
+      </select>
+    `;
+    document.getElementById('proxy-editor-title')?.parentElement?.insertBefore(group, document.querySelector('.proxy-trigger-grid'));
+    typeSelect = group.querySelector('#proxy-type-input');
+  }
+  if (typeSelect) typeSelect.value = proxy?.proxyType || 'alter';
   const preview = document.getElementById('proxy-avatar-preview');
   if (preview) {
     preview.innerHTML = this._proxySettings.draftAvatarUrl
@@ -976,6 +1015,7 @@ _saveProxyDraft() {
     triggerSuffix: document.getElementById('proxy-suffix-input')?.value || '',
     groupName: document.getElementById('proxy-group-input')?.value || '',
     bio: document.getElementById('proxy-bio-input')?.value || '',
+    proxyType: document.getElementById('proxy-type-input')?.value || 'alter',
     isPublic: !!document.getElementById('proxy-public-input')?.checked,
     avatarUrl: this._proxySettings.draftAvatarUrl || ''
   };
