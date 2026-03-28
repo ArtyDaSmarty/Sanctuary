@@ -3587,6 +3587,10 @@ _getCurrentServerMeta() {
   return (this.servers || []).find(s => s.id === this.currentServerId) || this.servers?.[0] || null;
 },
 
+_getAnnouncementChannel() {
+  return (this.channels || []).find(c => c.special_section === 'announcements') || null;
+},
+
 _applyThemePreferenceStack() {
   const selectedServer = this._getCurrentServerMeta?.();
   if (selectedServer?.theme && selectedServer?.theme_force_override) {
@@ -3608,9 +3612,9 @@ _selectServer(serverId) {
   if (!serverId) return;
   this.sidebarView = 'servers';
   this.currentServerId = serverId;
-  const currentInServer = this.channels.find(c => c.code === this.currentChannel && !c.is_dm && c.server_id === serverId);
+  const currentInServer = this.channels.find(c => c.code === this.currentChannel && !c.is_dm && !c.special_section && c.server_id === serverId);
   if (!currentInServer) {
-    const firstChannel = this.channels.find(c => !c.is_dm && c.server_id === serverId);
+    const firstChannel = this.channels.find(c => !c.is_dm && !c.special_section && c.server_id === serverId);
     if (firstChannel) this.switchChannel(firstChannel.code);
   }
   this._renderServerBar();
@@ -3662,6 +3666,13 @@ _setupServerBar() {
     this.sidebarView = 'dms';
     const firstDm = this.channels.find(c => c.is_dm);
     if (firstDm) this.switchChannel(firstDm.code);
+    this._renderServerBar();
+    this._renderChannels();
+  });
+  document.getElementById('announcements-server-bubble')?.addEventListener('click', () => {
+    this.sidebarView = 'announcements';
+    const channel = this._getAnnouncementChannel?.();
+    if (channel) this.switchChannel(channel.code);
     this._renderServerBar();
     this._renderChannels();
   });
@@ -3788,9 +3799,11 @@ _renderServerBar() {
   const main = (this.servers || []).find(s => s.name === 'Main') || this.servers?.[0];
   const home = document.getElementById('home-server');
   const dmBubble = document.getElementById('dm-server-bubble');
+  const announcementsBubble = document.getElementById('announcements-server-bubble');
   if (dmBubble) dmBubble.classList.toggle('active', this.sidebarView === 'dms');
+  if (announcementsBubble) announcementsBubble.classList.toggle('active', this.sidebarView === 'announcements');
   if (home) {
-    home.classList.toggle('active', this.sidebarView !== 'dms' && !!main && this.currentServerId === main.id);
+    home.classList.toggle('active', this.sidebarView !== 'dms' && this.sidebarView !== 'announcements' && !!main && this.currentServerId === main.id);
     home.title = main ? `${main.name}` : 'Main';
     const text = home.querySelector('.server-icon-text');
     if (text) text.textContent = main?.name?.charAt(0)?.toUpperCase() || 'M';
