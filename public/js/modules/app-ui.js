@@ -3880,14 +3880,11 @@ _renderServerBar() {
   if (announcementsBubble) announcementsBubble.classList.toggle('active', this.sidebarView === 'announcements');
   if (home) {
     home.classList.toggle('active', this.sidebarView !== 'dms' && this.sidebarView !== 'announcements' && !!main && this.currentServerId === main.id);
-    const selectedServer = this._getCurrentServerMeta?.();
-    const useDefaultBranding = !selectedServer || selectedServer.name === 'Main' || selectedServer.is_legacy_main;
-    const homeName = useDefaultBranding
-      ? (this.serverSettings?.server_name || 'Sanctuary')
-      : (selectedServer.name || main?.name || 'Main');
+    const homeName = main?.name || 'Main';
+    const useDefaultBranding = !main || main.name === 'Main' || main.is_legacy_main;
     const homeIcon = useDefaultBranding
       ? (this.serverSettings?.server_icon || '')
-      : (selectedServer.icon_url || '');
+      : (main.icon_url || '');
     home.title = homeName;
     const text = home.querySelector('.server-icon-text');
     if (text) text.textContent = homeName?.charAt(0)?.toUpperCase() || 'S';
