@@ -401,7 +401,7 @@ _openChannelCtxMenu(code, btnEl) {
   if (!menu) return;
   // Show/hide admin-only items (also allow users with create_channel perm)
   const isAdmin = this.user && this.user.isAdmin;
-  const canManageChannels = isAdmin || this._hasPerm('create_channel');
+  const canManageChannels = isAdmin || this._hasPerm('create_channel') || this._hasPerm('manage_sub_channels');
   const isMod = isAdmin || this._canModerate();
   menu.querySelectorAll('.admin-only').forEach(el => {
     el.style.display = canManageChannels ? '' : 'none';
@@ -433,14 +433,14 @@ _openChannelCtxMenu(code, btnEl) {
   const organizeBtn = menu.querySelector('[data-action="organize"]');
   if (organizeBtn) {
     const hasSubs = ch && !ch.parent_channel_id && this.channels.some(c => c.parent_channel_id === ch.id);
-    organizeBtn.style.display = (canManageChannels && hasSubs) ? '' : 'none';
+    organizeBtn.style.display = ((canManageChannels || this._hasPerm('manage_sub_channels')) && hasSubs) ? '' : 'none';
   }
   // Show "Move to…" for channels that can become sub-channels (no children of their own)
   const moveToBtn = menu.querySelector('[data-action="move-to-parent"]');
   if (moveToBtn && ch) {
     const hasChildren = this.channels.some(c => c.parent_channel_id === ch.id);
     // Can move if: admin, not a DM, and has no children (can't nest 2 levels)
-    moveToBtn.style.display = (canManageChannels && !ch.is_dm && !hasChildren) ? '' : 'none';
+    moveToBtn.style.display = ((canManageChannels || this._hasPerm('manage_sub_channels')) && !ch.is_dm && !hasChildren) ? '' : 'none';
   }
   // Show "Promote to Channel" only for sub-channels
   const promoteBtn = menu.querySelector('[data-action="promote-channel"]');
