@@ -160,6 +160,16 @@ router.post('/register', async (req, res) => {
       if (announcements?.id) {
         db.prepare('INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?, ?)').run(announcements.id, result.lastInsertRowid);
       }
+      const mainServer = db.prepare("SELECT id, home_channel_id FROM servers WHERE is_legacy_main = 1 OR name = 'Main' ORDER BY is_legacy_main DESC, id LIMIT 1").get();
+      const homeChannel = (mainServer?.home_channel_id
+        ? db.prepare('SELECT id FROM channels WHERE id = ? AND server_id = ? AND is_dm = 0 AND special_section IS NULL').get(mainServer.home_channel_id, mainServer.id)
+        : null)
+        || (mainServer
+          ? db.prepare('SELECT id FROM channels WHERE server_id = ? AND is_dm = 0 AND special_section IS NULL ORDER BY CASE WHEN parent_channel_id IS NULL THEN 0 ELSE 1 END, position, id LIMIT 1').get(mainServer.id)
+          : null);
+      if (homeChannel?.id) {
+        db.prepare('INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?, ?)').run(homeChannel.id, result.lastInsertRowid);
+      }
     } catch { /* non-critical */ }
 
     const token = jwt.sign(
