@@ -1419,25 +1419,42 @@ _showAdminActionModal(action, userId, username) {
   const scrubScopeRow = document.getElementById('admin-scrub-scope-row');
   const confirmBtn = document.getElementById('confirm-admin-action-btn');
 
-  const labels = { kick: 'Kick', ban: 'Ban', mute: 'Mute', 'delete-user': 'Delete User' };
+  const labels = {
+    kick: 'Admin Kick',
+    ban: 'Admin Ban',
+    mute: 'Admin Mute',
+    'admin-kick': 'Admin Kick',
+    'admin-ban': 'Admin Ban',
+    'admin-mute': 'Admin Mute',
+    'server-kick': 'Server Kick',
+    'server-ban': 'Server Ban',
+    'server-mute': 'Server Mute',
+    'delete-user': 'Delete User'
+  };
   title.textContent = `${labels[action] || action} — ${username}`;
-  desc.textContent = action === 'ban'
+  desc.textContent = (action === 'ban' || action === 'admin-ban')
     ? 'This user will be permanently banned until unbanned.'
-    : action === 'mute'
-      ? 'This user won\'t be able to send messages for the specified duration.'
+    : (action === 'mute' || action === 'admin-mute')
+      ? 'This user won\'t be able to send messages anywhere except Direct Messages for the specified duration.'
+      : action === 'server-ban'
+        ? 'This user will be removed from and blocked from rejoining the selected server.'
+        : action === 'server-mute'
+          ? 'This user won\'t be able to send messages in the selected server for the specified duration.'
       : action === 'delete-user'
         ? 'This will permanently delete this user\'s account and free their username.'
-        : 'This user will be removed from the current channel.';
+        : action === 'server-kick'
+          ? 'This user will be removed from the selected server.'
+          : 'This user will be removed from the current channel.';
 
-  durationGroup.style.display = action === 'mute' ? 'block' : 'none';
+  durationGroup.style.display = ['mute', 'admin-mute', 'server-mute'].includes(action) ? 'block' : 'none';
 
   // Show scrub option for kick, ban, and delete-user
-  const hasScrub = ['kick', 'ban', 'delete-user'].includes(action);
+  const hasScrub = ['kick', 'ban', 'admin-kick', 'admin-ban', 'delete-user'].includes(action);
   scrubGroup.style.display = hasScrub ? 'block' : 'none';
   scrubCheckbox.checked = false;
   // Kick gets scope dropdown (channel vs server), ban/delete are server-wide only
   scrubScopeRow.style.display = 'none';
-  if (action === 'kick') {
+  if (action === 'kick' || action === 'admin-kick') {
     scrubCheckbox.onchange = () => { scrubScopeRow.style.display = scrubCheckbox.checked ? 'block' : 'none'; };
   } else {
     scrubCheckbox.onchange = null;
