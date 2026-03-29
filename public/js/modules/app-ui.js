@@ -3882,20 +3882,21 @@ _renderServerBar() {
     home.classList.toggle('active', this.sidebarView !== 'dms' && this.sidebarView !== 'announcements' && !!main && this.currentServerId === main.id);
     const homeName = main?.name || 'Main';
     const useDefaultBranding = !main || main.name === 'Main' || main.is_legacy_main;
+    let img = home.querySelector('img');
+    const existingHomeIcon = img?.getAttribute('src') || '';
     const homeIcon = useDefaultBranding
       ? (this.serverSettings?.server_icon || '')
       : (main.icon_url || '');
     home.title = homeName;
     const text = home.querySelector('.server-icon-text');
     if (text) text.textContent = homeName?.charAt(0)?.toUpperCase() || 'S';
-    let img = home.querySelector('img');
-    if (homeIcon) {
+    if (homeIcon || existingHomeIcon) {
       if (!img) {
         img = document.createElement('img');
         img.alt = homeName;
         home.insertBefore(img, home.firstChild);
       }
-      img.src = homeIcon;
+      img.src = homeIcon || existingHomeIcon;
       img.style.display = '';
       if (text) text.style.display = 'none';
     } else {
