@@ -666,29 +666,6 @@ _applyServerBranding() {
     }
   }
 
-  // Server bar icon
-  const homeServer = document.getElementById('home-server');
-  if (homeServer) {
-    const existingImg = homeServer.querySelector('img');
-    const iconText = homeServer.querySelector('.server-icon-text');
-    if (icon) {
-      if (iconText) iconText.style.display = 'none';
-      if (!existingImg) {
-        const img = document.createElement('img');
-        img.src = icon;
-        img.alt = name;
-        homeServer.insertBefore(img, homeServer.firstChild);
-      } else {
-        existingImg.src = icon;
-        existingImg.style.display = '';
-      }
-    } else {
-      if (existingImg) existingImg.style.display = 'none';
-      if (iconText) iconText.style.display = '';
-    }
-    homeServer.title = selectedServer?.name || name;
-  }
-
   // Admin preview
   const preview = document.getElementById('server-icon-preview');
   if (preview) {
