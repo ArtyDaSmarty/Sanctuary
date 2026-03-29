@@ -544,6 +544,8 @@ _setupUI() {
   // ── DM Organize Modal ──
   document.getElementById('organize-dms-btn')?.addEventListener('click', (e) => {
     e.stopPropagation(); // don't toggle DM collapse
+    this.sidebarView = 'dms';
+    this._renderChannels?.();
     this._openDmOrganizeModal();
   });
   document.getElementById('dm-organize-sort')?.addEventListener('change', () => {
@@ -1706,6 +1708,9 @@ _setupUI() {
   document.getElementById('proxy-add-btn')?.addEventListener('click', () => {
     if (typeof this._openProxyEditor === 'function') this._openProxyEditor();
   });
+  document.getElementById('proxy-manage-btn')?.addEventListener('click', () => {
+    if (typeof this._openProxyManagerModal === 'function') this._openProxyManagerModal();
+  });
   document.getElementById('proxy-cancel-btn')?.addEventListener('click', () => {
     if (typeof this._resetProxyEditor === 'function') this._resetProxyEditor();
   });
@@ -1731,6 +1736,13 @@ _setupUI() {
     } finally {
       e.target.value = '';
     }
+  });
+  document.getElementById('proxy-manager-close-btn')?.addEventListener('click', () => {
+    const modal = document.getElementById('proxy-manager-modal');
+    if (modal) modal.style.display = 'none';
+  });
+  document.getElementById('proxy-manager-modal')?.addEventListener('click', (e) => {
+    if (e.target?.id === 'proxy-manager-modal') e.currentTarget.style.display = 'none';
   });
 
   document.getElementById('cancel-admin-action-btn').addEventListener('click', () => {
@@ -3626,11 +3638,12 @@ _selectServer(serverId) {
   if (!serverId) return;
   this.sidebarView = 'servers';
   this.currentServerId = serverId;
-  const currentInServer = this.channels.find(c => c.code === this.currentChannel && !c.is_dm && !c.special_section && c.server_id === serverId);
-  if (!currentInServer) {
-    const firstChannel = this.channels.find(c => !c.is_dm && !c.special_section && c.server_id === serverId);
-    if (firstChannel) this.switchChannel(firstChannel.code);
-  }
+  const server = (this.servers || []).find(s => s.id === serverId);
+  const homeChannel = server?.home_channel_id
+    ? this.channels.find(c => c.id === server.home_channel_id && !c.is_dm && !c.special_section && c.server_id === serverId)
+    : null;
+  const firstChannel = homeChannel || this.channels.find(c => !c.is_dm && !c.special_section && c.server_id === serverId);
+  if (firstChannel && this.currentChannel !== firstChannel.code) this.switchChannel(firstChannel.code);
   this._renderServerBar();
   this._renderChannels();
   this._refreshSelectedServerSettings();
@@ -3662,10 +3675,16 @@ _refreshSelectedServerSettings() {
   const label = document.getElementById('selected-server-settings-name');
   const themeSelect = document.getElementById('subserver-theme-select');
   const themeOverride = document.getElementById('subserver-theme-override');
+  const homeChannelSelect = document.getElementById('subserver-home-channel');
   if (label) label.textContent = server?.name || 'No server selected';
   if (nameInput) nameInput.value = server?.name || '';
   if (themeSelect) themeSelect.value = server?.theme || '';
   if (themeOverride) themeOverride.checked = !!server?.theme_force_override;
+  if (homeChannelSelect) {
+    const serverChannels = (this.channels || []).filter(c => !c.is_dm && !c.special_section && c.server_id === server?.id);
+    homeChannelSelect.innerHTML = `<option value="">Select a home channel</option>` + serverChannels.map(ch => `<option value="${ch.id}">${this._escapeHtml(ch.name)}</option>`).join('');
+    homeChannelSelect.value = server?.home_channel_id ? String(server.home_channel_id) : '';
+  }
   if (codeValue) codeValue.textContent = server?.code || '—';
   if (preview) {
     preview.innerHTML = server?.icon_url
