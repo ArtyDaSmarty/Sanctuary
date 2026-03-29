@@ -125,6 +125,7 @@ function initDatabase() {
       name TEXT NOT NULL,
       code TEXT UNIQUE NOT NULL,
       icon_url TEXT DEFAULT '',
+      home_channel_id INTEGER DEFAULT NULL REFERENCES channels(id) ON DELETE SET NULL,
       theme TEXT DEFAULT '',
       theme_force_override INTEGER NOT NULL DEFAULT 0,
       legacy_name TEXT DEFAULT NULL,
@@ -799,6 +800,29 @@ function initDatabase() {
   } catch {
     db.exec("ALTER TABLE messages ADD COLUMN imported_from TEXT DEFAULT NULL");
   }
+
+  // ── Migration: per-server home channel ──
+  try {
+    db.prepare("SELECT home_channel_id FROM servers LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE servers ADD COLUMN home_channel_id INTEGER DEFAULT NULL REFERENCES channels(id) ON DELETE SET NULL");
+  }
+  try {
+    const servers = db.prepare('SELECT id, home_channel_id FROM servers').all();
+    const updateHome = db.prepare(`
+      UPDATE servers
+      SET home_channel_id = (
+        SELECT id FROM channels
+        WHERE server_id = ? AND is_dm = 0 AND special_section IS NULL
+        ORDER BY CASE WHEN parent_channel_id IS NULL THEN 0 ELSE 1 END, position, id
+        LIMIT 1
+      )
+      WHERE id = ?
+    `);
+    for (const server of servers) {
+      if (!server.home_channel_id) updateHome.run(server.id, server.id);
+    }
+  } catch { /* ignore */ }
 
   // ── Migration: webhook_avatar column on messages (Discord import avatars) ──
   try {
