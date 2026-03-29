@@ -306,6 +306,10 @@ _applyServerSettings() {
     if (titleInput && this.serverSettings.server_title !== undefined) {
       titleInput.value = this.serverSettings.server_title || '';
     }
+    const versionInput = document.getElementById('server-version-input');
+    if (versionInput && this.serverSettings.display_version !== undefined) {
+      versionInput.value = this.serverSettings.display_version || '2.0';
+    }
     const cleanupEnabled = document.getElementById('cleanup-enabled');
     if (cleanupEnabled) {
       cleanupEnabled.checked = this.serverSettings.cleanup_enabled === 'true';
@@ -433,6 +437,7 @@ _snapshotAdminSettings() {
   this._adminSnapshot = {
     server_name: this.serverSettings.server_name || 'HAVEN',
     server_title: this.serverSettings.server_title || '',
+    display_version: this.serverSettings.display_version || '2.0',
     member_visibility: this.serverSettings.member_visibility || 'online',
     cleanup_enabled: this.serverSettings.cleanup_enabled || 'false',
     cleanup_max_age_days: this.serverSettings.cleanup_max_age_days || '0',
@@ -470,6 +475,12 @@ _saveAdminSettings() {
   const title = document.getElementById('server-title-input')?.value.trim() || '';
   if (title !== (snap.server_title || '')) {
     this.socket.emit('update-server-setting', { key: 'server_title', value: title });
+    changed = true;
+  }
+
+  const displayVersion = document.getElementById('server-version-input')?.value.trim() || '2.0';
+  if (displayVersion !== (snap.display_version || '2.0')) {
+    this.socket.emit('update-server-setting', { key: 'display_version', value: displayVersion });
     changed = true;
   }
 
@@ -571,6 +582,8 @@ _cancelAdminSettings() {
     if (ni) ni.value = snap.server_name;
     const ti = document.getElementById('server-title-input');
     if (ti) ti.value = snap.server_title || '';
+    const vi = document.getElementById('server-version-input');
+    if (vi) vi.value = snap.display_version || '2.0';
     const vis = document.getElementById('member-visibility-select');
     if (vis) vis.value = snap.member_visibility;
     const ce = document.getElementById('cleanup-enabled');
@@ -624,8 +637,10 @@ _renderWhitelist(list) {
 /* ── Server Branding (icon + name) ──────────────────── */
 
 _applyServerBranding() {
-  const name = this.serverSettings.server_name || 'HAVEN';
-  const icon = this.serverSettings.server_icon || '';
+  const selectedServer = this._getCurrentServerMeta?.();
+  const isMain = !selectedServer || selectedServer.is_legacy_main || selectedServer.name === 'Main';
+  const name = isMain ? (this.serverSettings.server_name || 'HAVEN') : (selectedServer.name || 'Server');
+  const icon = isMain ? (this.serverSettings.server_icon || '') : (selectedServer.icon_url || '');
 
   // Sidebar brand text
   const brandText = document.querySelector('.brand-text');
@@ -671,7 +686,7 @@ _applyServerBranding() {
       if (existingImg) existingImg.style.display = 'none';
       if (iconText) iconText.style.display = '';
     }
-    homeServer.title = name;
+    homeServer.title = selectedServer?.name || name;
   }
 
   // Admin preview
@@ -867,7 +882,7 @@ _renderAllMembers(members) {
         btns += `<button class="aml-action-btn aml-btn-remch" data-uid="${m.id}" data-uname="${this._escapeHtml(m.username)}" title="Remove from Channel">➖</button>`;
       }
       if (perms.canBan && !m.banned) {
-        btns += `<button class="aml-action-btn aml-btn-ban" data-uid="${m.id}" data-uname="${this._escapeHtml(m.username)}" title="Ban from Server">⛔</button>`;
+        btns += `<button class="aml-action-btn aml-btn-ban" data-uid="${m.id}" data-uname="${this._escapeHtml(m.username)}" title="Admin Ban">⛔</button>`;
       }
       if (perms.isAdmin && m.banned) {
         btns += `<button class="aml-action-btn aml-btn-unban" data-uid="${m.id}" data-uname="${this._escapeHtml(m.username)}" title="Unban">✅</button>`;
@@ -964,7 +979,7 @@ _bindMemberListActions(container) {
       e.stopPropagation();
       const uid = parseInt(btn.dataset.uid);
       const uname = btn.dataset.uname;
-      self._showAdminActionModal('ban', uid, uname);
+      self._showAdminActionModal('admin-ban', uid, uname);
     });
   });
 
