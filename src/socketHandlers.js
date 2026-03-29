@@ -6801,8 +6801,12 @@ function setupSocketHandlers(io, db) {
         db.prepare('DELETE FROM channel_members WHERE channel_id = ?').run(channel.id);
         db.prepare('DELETE FROM channels WHERE id = ?').run(channel.id);
 
-        // Broadcast enriched channel list
-        broadcastChannelLists();
+        // Immediate refresh so the deleted sub-channel disappears right away
+        for (const [, s] of io.sockets.sockets) {
+          if (!s.user) continue;
+          s.leave(`channel:${code}`);
+          s.emit('channels-list', getEnrichedChannels(s.user.id, s.user.isAdmin, null));
+        }
 
         socket.emit('error-msg', `Sub-channel deleted`);
       } catch (err) {
