@@ -450,7 +450,8 @@ _snapshotAdminSettings() {
     max_poll_options: this.serverSettings.max_poll_options || '10',
     default_theme: this.serverSettings.default_theme || '',
     subserver_name: this._getCurrentServerMeta?.()?.name || '',
-    subserver_theme_override: !!this._getCurrentServerMeta?.()?.theme_force_override
+    subserver_theme_override: !!this._getCurrentServerMeta?.()?.theme_force_override,
+    subserver_home_channel_id: String(this._getCurrentServerMeta?.()?.home_channel_id || '')
   };
   // Load webhooks list for admin preview
   if (this.user?.isAdmin) {
@@ -554,13 +555,15 @@ _saveAdminSettings() {
   const subserverName = document.getElementById('subserver-name-input')?.value.trim() || '';
   const subserverTheme = document.getElementById('subserver-theme-select')?.value || '';
   const subserverThemeOverride = !!document.getElementById('subserver-theme-override')?.checked;
-  if (selectedServer?.id && ((subserverName && subserverName !== (snap.subserver_name || '')) || subserverTheme !== (selectedServer.theme || '') || subserverThemeOverride !== !!snap.subserver_theme_override)) {
+  const subserverHomeChannel = document.getElementById('subserver-home-channel')?.value || '';
+  if (selectedServer?.id && ((subserverName && subserverName !== (snap.subserver_name || '')) || subserverTheme !== (selectedServer.theme || '') || subserverThemeOverride !== !!snap.subserver_theme_override || String(selectedServer.home_channel_id || '') !== subserverHomeChannel)) {
     this.socket.emit('update-subserver', {
       serverId: selectedServer.id,
       name: subserverName,
       iconUrl: selectedServer.icon_url || '',
       theme: subserverTheme,
-      themeForceOverride: subserverThemeOverride
+      themeForceOverride: subserverThemeOverride,
+      homeChannelId: subserverHomeChannel ? parseInt(subserverHomeChannel, 10) : null
     }, (res) => {
       if (!res?.error) this.socket.emit('get-servers');
     });
@@ -610,6 +613,8 @@ _cancelAdminSettings() {
     if (ssn) ssn.value = snap.subserver_name || '';
     const sto = document.getElementById('subserver-theme-override');
     if (sto) sto.checked = !!snap.subserver_theme_override;
+    const shc = document.getElementById('subserver-home-channel');
+    if (shc) shc.value = snap.subserver_home_channel_id || '';
   }
   document.getElementById('settings-modal').style.display = 'none';
 },
