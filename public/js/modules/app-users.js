@@ -85,13 +85,25 @@ _showUserGearMenu(anchorEl, userId, username) {
   const canMod = this.user.isAdmin || this._canModerate();
   const canPromote = this._hasPerm('promote_user');
   const isAdmin = this.user.isAdmin;
+  const canManageServer = !!(this.user.isAdmin || this._hasPerm('manage_server'));
+  const canKick = !!(this.user.isAdmin || this._hasPerm('kick_user'));
+  const canMute = !!(this.user.isAdmin || this._hasPerm('mute_user'));
+  const canBan = !!(this.user.isAdmin || this._hasPerm('ban_user'));
+  const isBlocked = (this.blockedUserIds || []).includes(userId);
+  const isMutedPersonal = (this.mutedUserIds || []).includes(userId);
 
   let items = '';
+  if (userId !== this.user.id) items += `<button class="gear-menu-item" data-action="${isBlocked ? 'unblock-user' : 'block-user'}">${isBlocked ? '✅ Unblock User' : '🚫 Block User'}</button>`;
+  if (userId !== this.user.id) items += `<button class="gear-menu-item" data-action="${isMutedPersonal ? 'unmute-user-personal' : 'mute-user-personal'}">${isMutedPersonal ? '🔔 Unmute User' : '🔕 Mute User'}</button>`;
   if (canPromote) items += `<button class="gear-menu-item" data-action="assign-role">👑 Assign Role</button>`;
-  if (canMod) items += `<button class="gear-menu-item" data-action="kick">👢 Kick</button>`;
-  if (canMod) items += `<button class="gear-menu-item" data-action="mute">🔇 Mute</button>`;
+  if (canManageServer || canKick || canMute || canBan) items += `<div class="gear-menu-divider"></div>`;
+  if (canKick && this.currentServerId) items += `<button class="gear-menu-item" data-action="server-kick">👢 Server Kick</button>`;
+  if (canMute && this.currentServerId) items += `<button class="gear-menu-item" data-action="server-mute">🔇 Server Mute</button>`;
+  if (canBan && this.currentServerId) items += `<button class="gear-menu-item gear-menu-danger" data-action="server-ban">⛔ Server Ban</button>`;
+  if (canMod) items += `<button class="gear-menu-item" data-action="admin-kick">👢 Admin Kick</button>`;
+  if (canMod) items += `<button class="gear-menu-item" data-action="admin-mute">🔇 Admin Mute</button>`;
   if (isAdmin) items += `<button class="gear-menu-item" data-action="reset-password">🔑 Reset Password</button>`;
-  if (isAdmin) items += `<button class="gear-menu-item gear-menu-danger" data-action="ban">⛔ Ban</button>`;
+  if (isAdmin) items += `<button class="gear-menu-item gear-menu-danger" data-action="admin-ban">⛔ Admin Ban</button>`;
   if (isAdmin) items += `<button class="gear-menu-item gear-menu-danger" data-action="delete-user">🗑️ Delete User</button>`;
   if (isAdmin) items += `<div class="gear-menu-divider"></div><button class="gear-menu-item gear-menu-danger" data-action="transfer-admin">🔑 Transfer Admin</button>`;
 
@@ -121,6 +133,8 @@ _showUserGearMenu(anchorEl, userId, username) {
       this._closeUserGearMenu();
       if (action === 'assign-role') {
         this._openRoleAssignCenter(userId);
+      } else if (['block-user', 'unblock-user', 'mute-user-personal', 'unmute-user-personal'].includes(action)) {
+        this.socket.emit(action, { userId });
       } else if (action === 'reset-password') {
         this._promptAdminPasswordReset(userId, username);
       } else if (action === 'transfer-admin') {
