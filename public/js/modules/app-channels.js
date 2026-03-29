@@ -119,6 +119,7 @@ async switchChannel(code) {
   this.unreadCounts[code] = 0;
   if (channel) channel.unreadCount = 0;
   this._updateBadge(code);
+  this._renderInbox?.();
 
   document.getElementById('status-channel').textContent = isDm && channel.dm_target
     ? `DM: ${channel.dm_target.username}` : isAnnouncementHub ? 'Admin Announcements' : channel ? channel.name : code;
@@ -1975,87 +1976,71 @@ _renderChannels() {
     if (this.socket?.connected) this.socket.emit('get-voice-counts');
   }, 600);
   this._updateAnnouncementSectionBadge();
+  this._renderInbox?.();
 },
 
 _updateBadge(code) {
-  const el = document.querySelector(`.channel-item[data-code="${code}"]`);
-  const channel = this.channels.find(c => c.code === code);
-  if (!el && channel?.parent_channel_id) {
-    const parentChannel = this.channels.find(c => c.id === channel.parent_channel_id);
-    if (parentChannel?.channel_type === 'forum') {
-      const parentEl = document.querySelector(`.channel-item[data-code="${parentChannel.code}"]`);
-      if (parentEl) {
-        const siblingTotal = this.channels
-          .filter(c => c.parent_channel_id === parentChannel.id)
-          .reduce((sum, sc) => sum + (this.unreadCounts[sc.code] || 0), 0);
-        let parentBubble = parentEl.querySelector('.channel-badge-bubble');
-        if (siblingTotal > 0) {
-          if (!parentBubble) {
-            parentBubble = document.createElement('span');
-            parentBubble.className = 'channel-badge channel-badge-bubble';
-            parentEl.appendChild(parentBubble);
-          }
-          parentBubble.textContent = siblingTotal > 99 ? '99+' : siblingTotal;
-        } else if (parentBubble) {
-          parentBubble.remove();
-        }
-      }
-    }
-  }
-  if (el) {
-    let badge = el.querySelector('.channel-badge');
-    const count = this.unreadCounts[code] || 0;
-
-    if (count > 0) {
-      const isAnn = channel && channel.notification_type === 'announcement';
-      if (!badge) { badge = document.createElement('span'); badge.className = 'channel-badge' + (isAnn ? ' announcement-badge' : ''); el.appendChild(badge); }
-      badge.textContent = count > 99 ? '99+' : count;
-    } else if (badge) {
-      badge.remove();
-    }
-
-    // If this is a sub-channel whose parent is currently collapsed, bubble an unread
-    // indicator up to the parent so the user knows to expand it.
-    if (el.dataset.parentId) {
-      const parentChannel = this.channels.find(c => c.id === parseInt(el.dataset.parentId));
-      if (parentChannel) {
-        const parentEl = document.querySelector(`.channel-item[data-code="${parentChannel.code}"]`);
-        if (parentEl) {
-          // Check if sub-channels are collapsed (arrow has 'collapsed' class)
-          const arrow = parentEl.querySelector('.channel-collapse-arrow');
-          if (arrow && arrow.classList.contains('collapsed')) {
-            // Count total unreads across all sub-channels of this parent
-            const siblingCodes = this.channels
-              .filter(c => c.parent_channel_id === parentChannel.id)
-              .map(c => c.code);
-            const siblingTotal = siblingCodes.reduce((sum, sc) => sum + (this.unreadCounts[sc] || 0), 0);
-            let parentBubble = parentEl.querySelector('.channel-badge-bubble');
-            if (siblingTotal > 0) {
-              if (!parentBubble) {
-                parentBubble = document.createElement('span');
-                parentBubble.className = 'channel-badge channel-badge-bubble';
-                parentEl.appendChild(parentBubble);
-              }
-              parentBubble.textContent = siblingTotal > 99 ? '99+' : siblingTotal;
-            } else if (parentBubble) {
-              parentBubble.remove();
-            }
-          } else {
-            // Sub-channels are expanded — remove any bubble from parent
-            const parentBubble = parentEl.querySelector('.channel-badge-bubble');
-            if (parentBubble) parentBubble.remove();
-          }
-        }
-      }
-    }
-  }
-
-  // Always update DM section badge, tab title, and desktop badge
-  // even if the individual channel item isn't in the DOM
-  this._updateDmSectionBadge();
-  this._updateAnnouncementSectionBadge();
+  this._renderInbox?.();
   this._updateTabTitle();
   this._updateDesktopBadge();
+},
+
+_markChannelUnreadHandled(code, jumpToChannel = false) {
+  const channel = (this.channels || []).find(c => c.code === code);
+  if (!channel) return;
+  const latestId = channel.latestMessageId || 0;
+  this.unreadCounts[code] = 0;
+  channel.unreadCount = 0;
+  if (latestId > 0 && this.socket?.connected) {
+    this.socket.emit('mark-read', { code, messageId: latestId });
+  }
+  this._renderInbox?.();
+  this._updateTabTitle();
+  this._updateDesktopBadge();
+  if (jumpToChannel) this.switchChannel(code);
+},
+
+_renderInbox() {
+  const list = document.getElementById('inbox-list');
+  if (!list) return;
+  const items = (this.channels || [])
+    .filter(ch => (this.unreadCounts?.[ch.code] || ch.unreadCount || 0) > 0)
+    .sort((a, b) => (b.latestMessageId || 0) - (a.latestMessageId || 0));
+
+  if (!items.length) {
+    list.innerHTML = '<p class="muted-text">No unread messages.</p>';
+    return;
+  }
+
+  const channelLabel = (channel) => {
+    if (channel.is_dm) {
+      const dmName = channel.dm_target ? this._getNickname(channel.dm_target.id, channel.dm_target.username) : 'DM';
+      return `@${this._escapeHtml(dmName)}`;
+    }
+    if (channel.special_section === 'announcements') return 'Admin Announcements';
+    return `#${this._escapeHtml(channel.name || 'channel')}`;
+  };
+
+  list.innerHTML = items.map((channel) => {
+    const count = this.unreadCounts?.[channel.code] || channel.unreadCount || 0;
+    const messageLabel = `${count} Unread Message${count === 1 ? '' : 's'} In ${channelLabel(channel)}`;
+    return `
+      <div class="inbox-item" data-code="${channel.code}">
+        <div class="inbox-item-copy">${messageLabel}</div>
+        <div class="inbox-item-actions">
+          <button class="btn-sm btn-accent inbox-jump-btn" data-code="${channel.code}">Jump</button>
+          <button class="btn-sm inbox-read-btn" data-code="${channel.code}">Mark as Read</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  list.querySelectorAll('.inbox-jump-btn').forEach((btn) => {
+    btn.addEventListener('click', () => this._markChannelUnreadHandled(btn.dataset.code, true));
+  });
+  list.querySelectorAll('.inbox-read-btn').forEach((btn) => {
+    btn.addEventListener('click', () => this._markChannelUnreadHandled(btn.dataset.code, false));
+  });
 },
 
 _updateTabTitle() {
@@ -2120,33 +2105,11 @@ _fireNativeNotification(message, channelCode) {
 },
 
 _updateDmSectionBadge() {
-  const dmChannels = (this.channels || []).filter(c => c.is_dm);
-  const total = dmChannels.reduce((sum, ch) => sum + (this.unreadCounts[ch.code] || 0), 0);
-  ['dm-server-badge', 'dm-section-badge', 'dm-unread-badge'].forEach((id) => {
-    const badge = document.getElementById(id);
-    if (!badge) return;
-    if (total > 0) {
-      badge.textContent = total > 99 ? '99+' : total;
-      badge.style.display = '';
-    } else {
-      badge.textContent = '';
-      badge.style.display = 'none';
-    }
-  });
+  return;
 },
 
 _updateAnnouncementSectionBadge() {
-  const channel = (this.channels || []).find(c => c.special_section === 'announcements');
-  const total = channel ? (this.unreadCounts[channel.code] || channel.unreadCount || 0) : 0;
-  const badge = document.getElementById('announcements-server-badge');
-  if (!badge) return;
-  if (total > 0) {
-    badge.textContent = total > 99 ? '99+' : total;
-    badge.style.display = '';
-  } else {
-    badge.textContent = '';
-    badge.style.display = 'none';
-  }
+  return;
 },
 
 _updateChannelVoiceIndicators() {
