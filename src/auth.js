@@ -1,888 +1,1001 @@
-const express = require('express');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
-const { getDb } = require('./database');
-const OTPAuth = require('otpauth');
-const QRCode = require('qrcode');
+const Database = require('better-sqlite3');
+const path = require('path');
+const { DB_PATH } = require('./paths');
 
-const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  console.error('FATAL: JWT_SECRET is not set. Check your .env file or let server.js auto-generate it.');
-  process.exit(1);
-}
-const ADMIN_USERNAME = (process.env.ADMIN_USERNAME || 'admin').toLowerCase();
+let db;
 
-// ── TOTP helpers ─────────────────────────────────────────
-// Short-lived tokens for the TOTP verification step (not full session tokens)
-function generateTotpChallengeToken(userId) {
-  return jwt.sign({ id: userId, purpose: 'totp_challenge' }, JWT_SECRET, { expiresIn: '5m' });
-}
+// ── Prepared-statement cache ──────────────────────────────
+// Every `db.prepare(sql)` allocates a native sqlite3_stmt.  In
+// socketHandlers.js the same queries are prepared on every socket event,
+// creating hundreds of native objects that only get freed when V8 GC
+// collects the JS wrapper.  Under load, GC can't keep up and Oilpan
+// hits a fatal "large allocation" error.
+//
+// This cache wraps db.prepare() so duplicate SQL strings reuse the same
+// Statement object.  Node.js is single-threaded, so concurrent access is
+// not a concern.  Dynamic SQL (e.g. `IN (?,?,?)`) still works — each
+// unique SQL string just gets its own cache entry.
+const _stmtCache = new Map();
+const MAX_STMT_CACHE = 500;   // safety cap — shouldn't be hit in practice
 
-function verifyTotpChallengeToken(token) {
+function initDatabase() {
+  db = new Database(DB_PATH);
+
+  // ── Performance settings (memory-conscious) ────────────
+  // These were originally set much higher (64 MB cache, 256 MB mmap) which
+  // combined to reserve ~320 MB of native memory for SQLite alone.  On the
+  // Haven Desktop machine that also runs Electron + a renderer, that left
+  // too little headroom and caused the Oilpan OOM crash.
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  db.pragma('synchronous = NORMAL');       // safe with WAL, 2-3x faster writes
+  db.pragma('cache_size = -8000');          // 8 MB page cache (was 64 MB — overkill for a chat app)
+  db.pragma('busy_timeout = 5000');         // wait up to 5 s on lock contention
+  db.pragma('temp_store = MEMORY');         // keep temp tables in RAM
+  db.pragma('mmap_size = 33554432');        // 32 MB memory-mapped I/O (was 256 MB)
+
+  // Hard-cap SQLite's own heap usage so it can never run away
+  db.pragma('soft_heap_limit = 33554432');  // 32 MB soft limit — SQLite tries to stay under
+  db.pragma('hard_heap_limit = 67108864');  // 64 MB hard ceiling
+
+  // ── Statement cache — intercept db.prepare() ──────────
+  const _origPrepare = db.prepare.bind(db);
+  db.prepare = function cachedPrepare(sql) {
+    let stmt = _stmtCache.get(sql);
+    if (stmt) return stmt;
+    // Safety cap: if cache grows too large (dynamic SQL), clear older entries
+    if (_stmtCache.size >= MAX_STMT_CACHE) {
+      // Remove oldest ~half of entries
+      const keys = [..._stmtCache.keys()];
+      for (let i = 0; i < keys.length / 2; i++) _stmtCache.delete(keys[i]);
+    }
+    stmt = _origPrepare(sql);
+    _stmtCache.set(sql, stmt);
+    return stmt;
+  };
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL COLLATE NOCASE,
+      password_hash TEXT NOT NULL,
+      is_admin INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS channels (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      code TEXT UNIQUE NOT NULL,
+      server_id INTEGER DEFAULT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      created_by INTEGER REFERENCES users(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS channel_members (
+      channel_id INTEGER REFERENCES channels(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (channel_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel_id INTEGER REFERENCES channels(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      content TEXT NOT NULL,
+      reply_to INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS reactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      emoji TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(message_id, user_id, emoji)
+    );
+
+    CREATE TABLE IF NOT EXISTS bans (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      banned_by INTEGER NOT NULL REFERENCES users(id),
+      reason TEXT DEFAULT '',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS mutes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      muted_by INTEGER NOT NULL REFERENCES users(id),
+      reason TEXT DEFAULT '',
+      expires_at DATETIME NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS server_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS servers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      code TEXT UNIQUE NOT NULL,
+      icon_url TEXT DEFAULT '',
+      home_channel_id INTEGER DEFAULT NULL REFERENCES channels(id) ON DELETE SET NULL,
+      theme TEXT DEFAULT '',
+      theme_force_override INTEGER NOT NULL DEFAULT 0,
+      legacy_name TEXT DEFAULT NULL,
+      is_legacy_main INTEGER NOT NULL DEFAULT 0,
+      created_by INTEGER REFERENCES users(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      position INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS user_preferences (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      PRIMARY KEY (user_id, key)
+    );
+
+    CREATE TABLE IF NOT EXISTS user_blocks (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      blocked_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, blocked_user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS user_mutes (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      muted_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, muted_user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS server_bans (
+      server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      banned_by INTEGER NOT NULL REFERENCES users(id),
+      reason TEXT DEFAULT '',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (server_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS server_mutes (
+      server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      muted_by INTEGER NOT NULL REFERENCES users(id),
+      reason TEXT DEFAULT '',
+      expires_at DATETIME NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (server_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS eula_acceptances (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      version TEXT NOT NULL,
+      ip_address TEXT,
+      accepted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_id, version)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_channel
+      ON messages(channel_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_channel_code
+      ON channels(code);
+    CREATE INDEX IF NOT EXISTS idx_reactions_message
+      ON reactions(message_id);
+    CREATE INDEX IF NOT EXISTS idx_bans_user
+      ON bans(user_id);
+    CREATE INDEX IF NOT EXISTS idx_mutes_user
+      ON mutes(user_id, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_user_blocks_user
+      ON user_blocks(user_id);
+    CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked
+      ON user_blocks(blocked_user_id);
+    CREATE INDEX IF NOT EXISTS idx_user_mutes_user
+      ON user_mutes(user_id);
+    CREATE INDEX IF NOT EXISTS idx_server_bans_server
+      ON server_bans(server_id, user_id);
+    CREATE INDEX IF NOT EXISTS idx_server_mutes_server
+      ON server_mutes(server_id, user_id, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_channel_id
+      ON messages(channel_id, id DESC);
+  `);
+
+  // ── Safe schema migration for existing databases ──────
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (decoded.purpose !== 'totp_challenge') return null;
-    return decoded;
-  } catch { return null; }
-}
-
-function generateBackupCodes(count = 8) {
-  const codes = [];
-  for (let i = 0; i < count; i++) {
-    // 8-char alphanumeric codes, grouped as XXXX-XXXX for readability
-    const raw = crypto.randomBytes(4).toString('hex').toUpperCase();
-    codes.push(raw.slice(0, 4) + '-' + raw.slice(4));
-  }
-  return codes;
-}
-
-// ── Rate Limiting (in-memory, no extra deps) ────────────
-const rateLimitStore = new Map();
-
-function authLimiter(req, res, next) {
-  const ip = req.ip || req.socket.remoteAddress;
-  const now = Date.now();
-  const windowMs = 15 * 60 * 1000; // 15 minutes
-  const maxAttempts = 20;           // 20 auth requests per 15 min per IP
-
-  if (!rateLimitStore.has(ip)) {
-    rateLimitStore.set(ip, []);
+    db.prepare("SELECT reply_to FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN reply_to INTEGER REFERENCES messages(id) ON DELETE SET NULL");
   }
 
-  const timestamps = rateLimitStore.get(ip).filter(t => now - t < windowMs);
-  rateLimitStore.set(ip, timestamps);
-
-  if (timestamps.length >= maxAttempts) {
-    return res.status(429).json({
-      error: 'Too many attempts. Try again in a few minutes.'
-    });
-  }
-
-  timestamps.push(now);
-  next();
-}
-
-// Clean up stale entries every 30 minutes
-setInterval(() => {
-  const now = Date.now();
-  const windowMs = 15 * 60 * 1000;
-  for (const [ip, timestamps] of rateLimitStore) {
-    const fresh = timestamps.filter(t => now - t < windowMs);
-    if (fresh.length === 0) rateLimitStore.delete(ip);
-    else rateLimitStore.set(ip, fresh);
-  }
-}, 30 * 60 * 1000);
-
-// ── Input Sanitization ──────────────────────────────────
-function sanitizeString(str, maxLen = 200) {
-  if (typeof str !== 'string') return '';
-  return str.trim().slice(0, maxLen);
-}
-
-// ── Register ──────────────────────────────────────────────
-router.post('/register', async (req, res) => {
+  // Create reactions table if it doesn't exist (already handled by CREATE IF NOT EXISTS above)
+  // but index may be missing on older DBs
   try {
-    const username = sanitizeString(req.body.username, 20);
-    const password = typeof req.body.password === 'string' ? req.body.password : '';
-    const eulaVersion = typeof req.body.eulaVersion === 'string' ? req.body.eulaVersion.trim() : '';
-    const ageVerified = req.body.ageVerified === true;
+    db.exec("CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id)");
+  } catch { /* already exists */ }
 
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password required' });
-    }
-    if (!eulaVersion) {
-      return res.status(400).json({ error: 'You must accept the Terms of Service & Release of Liability Agreement' });
-    }
-    if (!ageVerified) {
-      return res.status(400).json({ error: 'You must confirm that you are 18 years of age or older' });
-    }
+  // ── Migration: edited_at column on messages ───────────
+  try {
+    db.prepare("SELECT edited_at FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN edited_at DATETIME DEFAULT NULL");
+  }
 
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password required' });
-    }
-    if (username.length < 3 || username.length > 20) {
-      return res.status(400).json({ error: 'Username must be 3-20 characters' });
-    }
-    if (password.length < 8 || password.length > 128) {
-      return res.status(400).json({ error: 'Password must be 8-128 characters' });
-    }
-    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-      return res.status(400).json({ error: 'Username: letters, numbers, underscores only' });
-    }
+  try {
+    db.prepare("SELECT server_id FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN server_id INTEGER DEFAULT NULL REFERENCES servers(id) ON DELETE CASCADE");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_channels_server_id ON channels(server_id)");
+  try {
+    db.prepare("SELECT legacy_name FROM servers LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE servers ADD COLUMN legacy_name TEXT DEFAULT NULL");
+  }
+  try {
+    db.prepare("SELECT is_legacy_main FROM servers LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE servers ADD COLUMN is_legacy_main INTEGER NOT NULL DEFAULT 0");
+  }
+  try {
+    db.prepare("SELECT theme FROM servers LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE servers ADD COLUMN theme TEXT DEFAULT ''");
+  }
+  try {
+    db.prepare("SELECT theme_force_override FROM servers LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE servers ADD COLUMN theme_force_override INTEGER NOT NULL DEFAULT 0");
+  }
 
-    const db = getDb();
+  // ── Migration: high_scores table ────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS high_scores (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      game TEXT NOT NULL,
+      score INTEGER NOT NULL DEFAULT 0,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, game)
+    );
+  `);
 
-    // Whitelist check — if enabled, only pre-approved usernames can register
-    const wlSetting = db.prepare("SELECT value FROM server_settings WHERE key = 'whitelist_enabled'").get();
-    if (wlSetting && wlSetting.value === 'true') {
-      const onList = db.prepare('SELECT 1 FROM whitelist WHERE username = ?').get(username);
-      if (!onList) {
-        return res.status(403).json({ error: 'Registration is restricted. Your username is not on the whitelist.' });
-      }
-    }
+  // ── Migration: whitelist table ─────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS whitelist (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL COLLATE NOCASE,
+      added_by INTEGER REFERENCES users(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
 
-    const existing = db.prepare('SELECT id FROM users WHERE LOWER(username) = LOWER(?)').get(username);
-    if (existing) {
-      return res.status(400).json({ error: 'Registration could not be completed' });
-    }
+  // ── Migration: seed default server settings ───────────
+  const insertSetting = db.prepare(
+    'INSERT OR IGNORE INTO server_settings (key, value) VALUES (?, ?)'
+  );
+  insertSetting.run('member_visibility', 'online');  // 'all', 'online', 'none'
+  insertSetting.run('cleanup_enabled', 'false');       // auto-cleanup toggle
+  insertSetting.run('cleanup_max_age_days', '0');      // delete messages older than N days (0 = disabled)
+  insertSetting.run('cleanup_max_size_mb', '0');       // delete oldest messages when DB exceeds N MB (0 = disabled)
+  insertSetting.run('cleanup_messages_mb', '0');       // delete oldest message bodies until under limit
+  insertSetting.run('cleanup_attachments_mb', '0');    // delete oldest attachments until under limit
+  insertSetting.run('cleanup_emojis_mb', '0');         // delete oldest custom emojis until under limit
+  insertSetting.run('cleanup_sounds_mb', '0');         // delete oldest custom sounds until under limit
+  insertSetting.run('cleanup_proxy_avatars_mb', '0');  // delete oldest proxy avatars until under limit
+  insertSetting.run('whitelist_enabled', 'false');     // whitelist toggle
+  insertSetting.run('server_name', 'HAVEN');           // displayed in sidebar header + server bar
+  insertSetting.run('server_icon', '');                // path to uploaded server icon image
+  insertSetting.run('permission_thresholds', '{"create_channel":50}');    // JSON: { permission: minLevel } — auto-grant perms at level
+  insertSetting.run('server_code', '');                // server-wide invite code (joins all channels)
+  insertSetting.run('display_version', '2.0');         // displayed version in client UI
+  insertSetting.run('max_upload_mb', '25');             // max file upload size in MB
+  insertSetting.run('max_poll_options', '10');            // max poll answer options (2–25)
+  insertSetting.run('max_sound_kb', '1024');              // max soundboard file size in KB (256–10240)
+  insertSetting.run('max_emoji_kb', '256');               // max emoji file size in KB (64–1024)
+  insertSetting.run('max_proxy_avatar_kb', '256');
+  insertSetting.run('setup_wizard_complete', 'false');   // first-time admin setup wizard
 
-    const hash = await bcrypt.hash(password, 12);
-    const isAdmin = username.toLowerCase() === ADMIN_USERNAME ? 1 : 0;
+  function generateServerCode() {
+    let code;
+    do {
+      code = Math.random().toString(16).slice(2, 10).padEnd(8, '0').slice(0, 8);
+    } while (db.prepare('SELECT 1 FROM servers WHERE code = ?').get(code));
+    return code;
+  }
 
+  const mainServer = db.prepare("SELECT id FROM servers WHERE name = 'Main' ORDER BY id LIMIT 1").get();
+  const mainServerId = mainServer?.id || (() => {
     const result = db.prepare(
-      'INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)'
-    ).run(username, hash, isAdmin);
+      'INSERT INTO servers (name, code, icon_url, legacy_name, is_legacy_main, created_by, position) VALUES (?, ?, ?, ?, 1, NULL, 0)'
+    ).run('Main', generateServerCode(), '', 'Main');
+    return result.lastInsertRowid;
+  })();
 
-    // Auto-assign roles flagged as auto_assign to new users
-    try {
-      const autoRoles = db.prepare("SELECT id FROM roles WHERE auto_assign = 1 AND scope = 'server'").all();
-      const insertRole = db.prepare('INSERT OR IGNORE INTO user_roles (user_id, role_id, channel_id, granted_by) VALUES (?, ?, NULL, NULL)');
-      for (const role of autoRoles) {
-        insertRole.run(result.lastInsertRowid, role.id);
-        // Grant linked channel access for this role (fixes #79)
-        try {
-          const r = db.prepare('SELECT link_channel_access FROM roles WHERE id = ?').get(role.id);
-          if (r && r.link_channel_access) {
-            const grantChannels = db.prepare(
-              'SELECT channel_id FROM role_channel_access WHERE role_id = ? AND grant_on_promote = 1'
-            ).all(role.id);
-            const ins = db.prepare('INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?, ?)');
-            for (const ch of grantChannels) ins.run(ch.channel_id, result.lastInsertRowid);
-          }
-        } catch { /* non-critical */ }
-      }
-    } catch { /* non-critical */ }
+  db.prepare('UPDATE servers SET legacy_name = ?, is_legacy_main = 1 WHERE id = ?').run('Main', mainServerId);
 
-    try {
-      const announcements = db.prepare("SELECT id FROM channels WHERE special_section = 'announcements' LIMIT 1").get();
-      if (announcements?.id) {
-        db.prepare('INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?, ?)').run(announcements.id, result.lastInsertRowid);
-      }
-      const mainServer = db.prepare("SELECT id, home_channel_id FROM servers WHERE is_legacy_main = 1 OR name = 'Main' ORDER BY is_legacy_main DESC, id LIMIT 1").get();
-      const homeChannel = (mainServer?.home_channel_id
-        ? db.prepare('SELECT id FROM channels WHERE id = ? AND server_id = ? AND is_dm = 0 AND special_section IS NULL').get(mainServer.home_channel_id, mainServer.id)
-        : null)
-        || (mainServer
-          ? db.prepare('SELECT id FROM channels WHERE server_id = ? AND is_dm = 0 AND special_section IS NULL ORDER BY CASE WHEN parent_channel_id IS NULL THEN 0 ELSE 1 END, position, id LIMIT 1').get(mainServer.id)
-          : null);
-      if (homeChannel?.id) {
-        db.prepare('INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?, ?)').run(homeChannel.id, result.lastInsertRowid);
-      }
-    } catch { /* non-critical */ }
+  db.prepare('UPDATE channels SET server_id = ? WHERE is_dm = 0 AND server_id IS NULL').run(mainServerId);
 
-    const token = jwt.sign(
-      { id: result.lastInsertRowid, username, isAdmin: !!isAdmin, displayName: username, pwv: 1 },
-      JWT_SECRET,
-      { expiresIn: '7d' }
+  // ── Migration: pinned_messages table ──────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pinned_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      pinned_by INTEGER NOT NULL REFERENCES users(id),
+      pinned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(message_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pinned_channel ON pinned_messages(channel_id);
+  `);
+
+  // ── Migration: user status columns ──────────────────────
+  try {
+    db.prepare("SELECT status FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'online'");
+  }
+  try {
+    db.prepare("SELECT status_text FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN status_text TEXT DEFAULT ''");
+  }
+
+  // ── Migration: display_name column ────────────────────────
+  try {
+    db.prepare("SELECT display_name FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN display_name TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: avatar column ──────────────────────────────
+  try {
+    db.prepare("SELECT avatar FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: avatar_shape column ────────────────────────
+  try {
+    db.prepare("SELECT avatar_shape FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN avatar_shape TEXT DEFAULT 'circle'");
+  }
+
+  // ── Migration: bio column ─────────────────────────────────
+  try {
+    db.prepare("SELECT bio FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''");
+  }
+
+  // ── Migration: custom_sounds table (admin-uploaded notification sounds) ──
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS custom_sounds (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE NOT NULL,
+      filename TEXT NOT NULL,
+      uploaded_by INTEGER REFERENCES users(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  // ── Migration: custom_emojis table (admin-uploaded server emojis) ──
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS custom_emojis (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE NOT NULL,
+      filename TEXT NOT NULL,
+      uploaded_by INTEGER REFERENCES users(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  // ── Migration: channel topic column ─────────────────────
+  try {
+    db.prepare("SELECT topic FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN topic TEXT DEFAULT ''");
+  }
+
+  // ── Migration: DM flag on channels ──────────────────────
+  try {
+    db.prepare("SELECT is_dm FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN is_dm INTEGER DEFAULT 0");
+  }
+
+  // ── Migration: age_verified on eula_acceptances ─────────
+  try {
+    db.prepare("SELECT age_verified FROM eula_acceptances LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE eula_acceptances ADD COLUMN age_verified INTEGER DEFAULT 0");
+  }
+
+  // ── Migration: read positions table ─────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS read_positions (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      last_read_message_id INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, channel_id)
+    );
+  `);
+
+  // ── Migration: original_name on messages for file uploads ──
+  try {
+    db.prepare("SELECT original_name FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN original_name TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: channel code settings columns ─────────────
+  const codeSettingsCols = [
+    { name: 'code_visibility',        sql: "ALTER TABLE channels ADD COLUMN code_visibility TEXT DEFAULT 'public'" },
+    { name: 'code_mode',              sql: "ALTER TABLE channels ADD COLUMN code_mode TEXT DEFAULT 'static'" },
+    { name: 'code_rotation_type',     sql: "ALTER TABLE channels ADD COLUMN code_rotation_type TEXT DEFAULT 'time'" },
+    { name: 'code_rotation_interval', sql: "ALTER TABLE channels ADD COLUMN code_rotation_interval INTEGER DEFAULT 60" },
+    { name: 'code_rotation_counter',  sql: "ALTER TABLE channels ADD COLUMN code_rotation_counter INTEGER DEFAULT 0" },
+    { name: 'code_last_rotated',      sql: "ALTER TABLE channels ADD COLUMN code_last_rotated DATETIME DEFAULT NULL" },
+  ];
+  for (const col of codeSettingsCols) {
+    try { db.prepare(`SELECT ${col.name} FROM channels LIMIT 0`).get(); } catch { db.exec(col.sql); }
+  }
+
+  // ── Migration: sub-channels (parent_channel_id, position) ──
+  try {
+    db.prepare("SELECT parent_channel_id FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN parent_channel_id INTEGER DEFAULT NULL REFERENCES channels(id) ON DELETE SET NULL");
+  }
+  try {
+    db.prepare("SELECT position FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN position INTEGER DEFAULT 0");
+  }
+
+  // ── Migration: private sub-channels ──────────────────────
+  try {
+    db.prepare("SELECT is_private FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN is_private INTEGER DEFAULT 0");
+  }
+
+  // ── Migration: temporary channel expiry ─────────────────
+  try {
+    db.prepare("SELECT expires_at FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN expires_at DATETIME DEFAULT NULL");
+  }
+
+  // ── Migration: webhook message tracking ─────────────────
+  try {
+    db.prepare("SELECT is_webhook FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN is_webhook INTEGER DEFAULT 0");
+  }
+  try {
+    db.prepare("SELECT webhook_username FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN webhook_username TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: roles system ─────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS roles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      level INTEGER NOT NULL DEFAULT 0,
+      scope TEXT NOT NULL DEFAULT 'server',
+      color TEXT DEFAULT NULL,
+      auto_assign INTEGER NOT NULL DEFAULT 0,
+      is_cosmetic INTEGER NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
-    // Record EULA acceptance
-    if (eulaVersion) {
-      try {
-        db.prepare(
-          'INSERT OR IGNORE INTO eula_acceptances (user_id, version, ip_address, age_verified) VALUES (?, ?, ?, ?)'
-        ).run(result.lastInsertRowid, eulaVersion, req.ip || req.socket.remoteAddress || '', ageVerified ? 1 : 0);
-      } catch { /* non-critical */ }
-    }
-
-    res.json({
-      token,
-      user: { id: result.lastInsertRowid, username, isAdmin: !!isAdmin, displayName: username }
-    });
-  } catch (err) {
-    console.error('Register error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ── Login ─────────────────────────────────────────────────
-router.post('/login', async (req, res) => {
-  try {
-    const username = sanitizeString(req.body.username, 20);
-    const password = typeof req.body.password === 'string' ? req.body.password : '';
-    const eulaVersion = typeof req.body.eulaVersion === 'string' ? req.body.eulaVersion.trim() : '';
-    const ageVerified = req.body.ageVerified === true;
-
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password required' });
-    }
-    if (!eulaVersion) {
-      return res.status(400).json({ error: 'You must accept the Terms of Service & Release of Liability Agreement' });
-    }
-    if (!ageVerified) {
-      return res.status(400).json({ error: 'You must confirm that you are 18 years of age or older' });
-    }
-
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    // Check if user is banned
-    const ban = db.prepare('SELECT reason FROM bans WHERE user_id = ?').get(user.id);
-    if (ban) {
-      return res.status(403).json({ error: 'You have been banned from this server' });
-    }
-
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    // Bootstrap admin from ADMIN_USERNAME env only when NO admin exists
-    // (first run or recovery). Prevents overriding explicit admin transfers.
-    const anyAdmin = db.prepare('SELECT id FROM users WHERE is_admin = 1 LIMIT 1').get();
-    if (!anyAdmin && user.username.toLowerCase() === ADMIN_USERNAME && !user.is_admin) {
-      db.prepare('UPDATE users SET is_admin = 1 WHERE id = ?').run(user.id);
-      user.is_admin = 1;
-    }
-
-    const displayName = user.display_name || user.username;
-
-    // ── TOTP check: if enabled, require a second step ──
-    if (user.totp_enabled) {
-      const challengeToken = generateTotpChallengeToken(user.id);
-      return res.json({ requiresTOTP: true, challengeToken });
-    }
-
-    const token = jwt.sign(
-      { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName, pwv: user.password_version || 1 },
-      JWT_SECRET,
-      { expiresIn: '7d' }
+    CREATE TABLE IF NOT EXISTS user_roles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      server_id INTEGER DEFAULT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      channel_id INTEGER DEFAULT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      granted_by INTEGER REFERENCES users(id),
+      granted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (user_id, role_id, channel_id)
     );
 
-    // Record EULA acceptance
-    if (eulaVersion) {
-      try {
-        db.prepare(
-          'INSERT OR IGNORE INTO eula_acceptances (user_id, version, ip_address, age_verified) VALUES (?, ?, ?, ?)'
-        ).run(user.id, eulaVersion, req.ip || req.socket.remoteAddress || '', ageVerified ? 1 : 0);
-      } catch { /* non-critical */ }
-    }
-
-    res.json({
-      token,
-      user: { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName }
-    });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ── TOTP Validate (second step of login) ─────────────────
-router.post('/totp/validate', async (req, res) => {
-  try {
-    const challengeToken = typeof req.body.challengeToken === 'string' ? req.body.challengeToken : '';
-    const code = typeof req.body.code === 'string' ? req.body.code.replace(/\s/g, '') : '';
-
-    if (!challengeToken || !code) {
-      return res.status(400).json({ error: 'Challenge token and code required' });
-    }
-
-    const challenge = verifyTotpChallengeToken(challengeToken);
-    if (!challenge) {
-      return res.status(401).json({ error: 'Invalid or expired challenge. Please log in again.' });
-    }
-
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(challenge.id);
-    if (!user || !user.totp_enabled || !user.totp_secret) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    // Try TOTP code first
-    const totp = new OTPAuth.TOTP({
-      issuer: 'Haven',
-      label: user.username,
-      algorithm: 'SHA1',
-      digits: 6,
-      period: 30,
-      secret: OTPAuth.Secret.fromBase32(user.totp_secret)
-    });
-
-    const delta = totp.validate({ token: code, window: 1 });
-    let valid = delta !== null;
-
-    // If not a valid TOTP code, check backup codes
-    if (!valid) {
-      const normalizedCode = code.toUpperCase().replace(/-/g, '');
-      const backupCodes = db.prepare(
-        'SELECT id, code_hash FROM totp_backup_codes WHERE user_id = ? AND used = 0'
-      ).all(user.id);
-
-      for (const bc of backupCodes) {
-        // Compare hashed backup code
-        const codeToCheck = normalizedCode.slice(0, 4) + '-' + normalizedCode.slice(4);
-        if (crypto.timingSafeEqual(
-          Buffer.from(bc.code_hash, 'hex'),
-          Buffer.from(crypto.createHash('sha256').update(codeToCheck).digest('hex'), 'hex')
-        )) {
-          // Mark backup code as used
-          db.prepare('UPDATE totp_backup_codes SET used = 1 WHERE id = ?').run(bc.id);
-          valid = true;
-          break;
-        }
-      }
-    }
-
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid code' });
-    }
-
-    const displayName = user.display_name || user.username;
-    const token = jwt.sign(
-      { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName, pwv: user.password_version || 1 },
-      JWT_SECRET,
-      { expiresIn: '7d' }
+    CREATE TABLE IF NOT EXISTS role_permissions (
+      role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      permission TEXT NOT NULL,
+      allowed INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (role_id, permission)
     );
 
-    res.json({
-      token,
-      user: { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName }
-    });
-  } catch (err) {
-    console.error('TOTP validate error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ── TOTP Setup (generate secret + QR) ────────────────────
-router.post('/totp/setup', async (req, res) => {
+    CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id);
+    CREATE INDEX IF NOT EXISTS idx_user_roles_channel ON user_roles(channel_id);
+  `);
   try {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    const decoded = verifyToken(token);
-    if (!decoded) return res.status(401).json({ error: 'Unauthorized' });
-
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    if (user.totp_enabled) {
-      return res.status(400).json({ error: '2FA is already enabled' });
-    }
-
-    // Generate a new TOTP secret
-    const secret = new OTPAuth.Secret({ size: 20 });
-    const totp = new OTPAuth.TOTP({
-      issuer: 'Haven',
-      label: user.username,
-      algorithm: 'SHA1',
-      digits: 6,
-      period: 30,
-      secret
-    });
-
-    // Store secret (not yet enabled — user must verify first)
-    db.prepare('UPDATE users SET totp_secret = ? WHERE id = ?').run(secret.base32, user.id);
-
-    const otpauthUri = totp.toString();
-    const qrDataUrl = await QRCode.toDataURL(otpauthUri, { width: 256, margin: 2 });
-
-    res.json({
-      base32Secret: secret.base32,
-      otpauthUri,
-      qrDataUrl
-    });
-  } catch (err) {
-    console.error('TOTP setup error:', err);
-    res.status(500).json({ error: 'Server error' });
+    db.prepare('SELECT server_id FROM user_roles LIMIT 0').get();
+  } catch {
+    db.exec('ALTER TABLE user_roles ADD COLUMN server_id INTEGER DEFAULT NULL REFERENCES servers(id) ON DELETE CASCADE');
   }
-});
+  db.exec('CREATE INDEX IF NOT EXISTS idx_user_roles_server ON user_roles(server_id)');
 
-// ── TOTP Verify Setup (confirm code → enable) ────────────
-router.post('/totp/verify-setup', async (req, res) => {
-  try {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    const decoded = verifyToken(token);
-    if (!decoded) return res.status(401).json({ error: 'Unauthorized' });
+  // Seed default roles if none exist
+  const roleCount = db.prepare('SELECT COUNT(*) as cnt FROM roles').get();
+  if (roleCount.cnt === 0) {
+    const insertRole = db.prepare('INSERT INTO roles (name, level, scope, color) VALUES (?, ?, ?, ?)');
+    const insertPerm = db.prepare('INSERT INTO role_permissions (role_id, permission, allowed) VALUES (?, ?, 1)');
 
-    const code = typeof req.body.code === 'string' ? req.body.code.replace(/\s/g, '') : '';
-    if (!code) return res.status(400).json({ error: 'Verification code required' });
+    // Server Mod — level 50 (below admin which is implied level 100)
+    const serverMod = insertRole.run('Server Mod', 50, 'server', '#3498db');
+    const serverModPerms = [
+      'kick_user', 'mute_user', 'delete_message', 'pin_message',
+      'set_channel_topic', 'manage_sub_channels', 'rename_channel',
+      'rename_sub_channel', 'create_forum_posts', 'delete_lower_messages', 'manage_webhooks',
+      'upload_files', 'use_voice', 'view_history', 'view_all_members',
+      'manage_music_queue',
+      'delete_own_messages', 'edit_own_messages'
+    ];
+    serverModPerms.forEach(p => insertPerm.run(serverMod.lastInsertRowid, p));
 
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    // Channel Mod — level 25 (channel-scoped)
+    const channelMod = insertRole.run('Channel Mod', 25, 'channel', '#2ecc71');
+    const channelModPerms = [
+      'kick_user', 'mute_user', 'delete_message', 'pin_message',
+      'manage_sub_channels', 'rename_sub_channel', 'create_forum_posts', 'delete_lower_messages',
+      'upload_files', 'use_voice', 'view_history', 'manage_music_queue',
+      'delete_own_messages', 'edit_own_messages'
+    ];
+    channelModPerms.forEach(p => insertPerm.run(channelMod.lastInsertRowid, p));
 
-    if (user.totp_enabled) {
-      return res.status(400).json({ error: '2FA is already enabled' });
-    }
-    if (!user.totp_secret) {
-      return res.status(400).json({ error: 'No 2FA setup in progress. Start setup first.' });
-    }
-
-    const totp = new OTPAuth.TOTP({
-      issuer: 'Haven',
-      label: user.username,
-      algorithm: 'SHA1',
-      digits: 6,
-      period: 30,
-      secret: OTPAuth.Secret.fromBase32(user.totp_secret)
-    });
-
-    const delta = totp.validate({ token: code, window: 1 });
-    if (delta === null) {
-      return res.status(401).json({ error: 'Invalid code. Make sure your authenticator app is synced and try again.' });
-    }
-
-    // Enable TOTP and bump password_version to invalidate all existing sessions
-    const newPwv = (user.password_version || 1) + 1;
-    db.prepare('UPDATE users SET totp_enabled = 1, password_version = ? WHERE id = ?').run(newPwv, user.id);
-
-    // Generate backup codes
-    const backupCodes = generateBackupCodes(8);
-    const insertCode = db.prepare('INSERT INTO totp_backup_codes (user_id, code_hash) VALUES (?, ?)');
-    // Clear any old backup codes
-    db.prepare('DELETE FROM totp_backup_codes WHERE user_id = ?').run(user.id);
-    for (const c of backupCodes) {
-      const hash = crypto.createHash('sha256').update(c).digest('hex');
-      insertCode.run(user.id, hash);
-    }
-
-    // Issue a fresh token for the current session (carries new pwv so it stays valid)
-    const freshToken = jwt.sign(
-      { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName: user.display_name || user.username, pwv: newPwv },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    // Send the response first so the client can store the fresh token
-    res.json({ success: true, backupCodes, token: freshToken });
-
-    // After a short delay, disconnect all other sockets for this user (force-logout other devices)
-    const io = req.app.get('io');
-    if (io) {
-      setTimeout(() => {
-        for (const [, s] of io.sockets.sockets) {
-          if (s.user && s.user.id === user.id) {
-            s.emit('force-logout', { reason: 'totp_enabled' });
-            s.disconnect(true);
-          }
-        }
-      }, 500);
-    }
-  } catch (err) {
-    console.error('TOTP verify-setup error:', err);
-    res.status(500).json({ error: 'Server error' });
+    // User — level 1 (default role for all new users, auto-assigned)
+    const userRole = insertRole.run('User', 1, 'server', '#95a5a6');
+    db.prepare('UPDATE roles SET auto_assign = 1 WHERE id = ?').run(userRole.lastInsertRowid);
+    const userPerms = [
+      'delete_own_messages', 'edit_own_messages', 'upload_files',
+      'use_voice', 'view_history', 'use_tts', 'create_forum_posts'
+    ];
+    userPerms.forEach(p => insertPerm.run(userRole.lastInsertRowid, p));
   }
-});
 
-// ── TOTP Disable ─────────────────────────────────────────
-router.post('/totp/disable', async (req, res) => {
+  // ── Migration: add auto_assign column to roles if missing ──
   try {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    const decoded = verifyToken(token);
-    if (!decoded) return res.status(401).json({ error: 'Unauthorized' });
-
-    const password = typeof req.body.password === 'string' ? req.body.password : '';
-    if (!password) return res.status(400).json({ error: 'Password required to disable 2FA' });
-
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    if (!user.totp_enabled) {
-      return res.status(400).json({ error: '2FA is not enabled' });
-    }
-
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Incorrect password' });
-
-    db.prepare('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?').run(user.id);
-    db.prepare('DELETE FROM totp_backup_codes WHERE user_id = ?').run(user.id);
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error('TOTP disable error:', err);
-    res.status(500).json({ error: 'Server error' });
+    db.prepare('SELECT auto_assign FROM roles LIMIT 0').get();
+  } catch {
+    db.exec('ALTER TABLE roles ADD COLUMN auto_assign INTEGER NOT NULL DEFAULT 0');
+    // Mark the existing "User" role as auto-assign for backwards compat
+    db.prepare("UPDATE roles SET auto_assign = 1 WHERE name = 'User' AND level = 1 AND scope = 'server'").run();
   }
-});
-
-// ── TOTP Status ──────────────────────────────────────────
-router.get('/totp/status', (req, res) => {
   try {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    const decoded = verifyToken(token);
-    if (!decoded) return res.status(401).json({ error: 'Unauthorized' });
-
-    const db = getDb();
-    const user = db.prepare('SELECT totp_enabled FROM users WHERE id = ?').get(decoded.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    const remaining = db.prepare(
-      'SELECT COUNT(*) as count FROM totp_backup_codes WHERE user_id = ? AND used = 0'
-    ).get(decoded.id);
-
-    res.json({ enabled: !!user.totp_enabled, backupCodesRemaining: remaining?.count || 0 });
-  } catch (err) {
-    console.error('TOTP status error:', err);
-    res.status(500).json({ error: 'Server error' });
+    db.prepare('SELECT is_cosmetic FROM roles LIMIT 0').get();
+  } catch {
+    db.exec('ALTER TABLE roles ADD COLUMN is_cosmetic INTEGER NOT NULL DEFAULT 0');
   }
-});
 
-// ── TOTP Regenerate Backup Codes ─────────────────────────
-router.post('/totp/regenerate-backup', async (req, res) => {
-  try {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    const decoded = verifyToken(token);
-    if (!decoded) return res.status(401).json({ error: 'Unauthorized' });
-
-    const password = typeof req.body.password === 'string' ? req.body.password : '';
-    if (!password) return res.status(400).json({ error: 'Password required' });
-
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    if (!user.totp_enabled) {
-      return res.status(400).json({ error: '2FA is not enabled' });
-    }
-
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Incorrect password' });
-
-    const backupCodes = generateBackupCodes(8);
-    db.prepare('DELETE FROM totp_backup_codes WHERE user_id = ?').run(user.id);
-    const insertCode = db.prepare('INSERT INTO totp_backup_codes (user_id, code_hash) VALUES (?, ?)');
-    for (const c of backupCodes) {
-      const hash = crypto.createHash('sha256').update(c).digest('hex');
-      insertCode.run(user.id, hash);
-    }
-
-    res.json({ success: true, backupCodes });
-  } catch (err) {
-    console.error('TOTP regenerate-backup error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ── Change Password ──────────────────────────────────────
-router.post('/change-password', async (req, res) => {
-  try {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    const decoded = verifyToken(token);
-    if (!decoded) return res.status(401).json({ error: 'Unauthorized' });
-
-    const currentPassword = typeof req.body.currentPassword === 'string' ? req.body.currentPassword : '';
-    const newPassword = typeof req.body.newPassword === 'string' ? req.body.newPassword : '';
-
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ error: 'Current and new password required' });
-    }
-    if (newPassword.length < 8 || newPassword.length > 128) {
-      return res.status(400).json({ error: 'New password must be 8-128 characters' });
-    }
-
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    const valid = await bcrypt.compare(currentPassword, user.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
-
-    const hash = await bcrypt.hash(newPassword, 12);
-    const newPwv = (user.password_version || 1) + 1;
-    db.prepare('UPDATE users SET password_hash = ?, password_version = ? WHERE id = ?').run(hash, newPwv, user.id);
-
-    // Issue a fresh token so the session stays alive
-    const freshToken = jwt.sign(
-      { id: user.id, username: user.username, isAdmin: !!user.is_admin, displayName: user.display_name || user.username, pwv: newPwv },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    // Send the response FIRST so the client can store the fresh token
-    // before we disconnect sockets (prevents redirect loop)
-    res.json({ message: 'Password changed successfully', token: freshToken });
-
-    // Disconnect all existing sockets for this user (forces re-login on other sessions)
-    const io = req.app.get('io');
-    if (io) {
-      // Small delay to let the HTTP response reach the client first
-      setTimeout(() => {
-        for (const [, s] of io.sockets.sockets) {
-          if (s.user && s.user.id === user.id) {
-            s.emit('force-logout', { reason: 'password_changed' });
-            s.disconnect(true);
-          }
-        }
-      }, 500);
-    }
-  } catch (err) {
-    console.error('Change password error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-router.post('/admin/reset-password', async (req, res) => {
-  try {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    const decoded = verifyToken(token);
-    if (!decoded) return res.status(401).json({ error: 'Unauthorized' });
-
-    const targetUserId = Number(req.body.userId);
-    const newPassword = typeof req.body.newPassword === 'string' ? req.body.newPassword : '';
-    if (!Number.isInteger(targetUserId) || targetUserId <= 0) {
-      return res.status(400).json({ error: 'Invalid user' });
-    }
-    if (newPassword.length < 8 || newPassword.length > 128) {
-      return res.status(400).json({ error: 'New password must be 8-128 characters' });
-    }
-
-    const db = getDb();
-    const actor = db.prepare('SELECT id, is_admin FROM users WHERE id = ?').get(decoded.id);
-    if (!actor?.is_admin) return res.status(403).json({ error: 'Only admins can reset passwords' });
-
-    const targetUser = db.prepare('SELECT * FROM users WHERE id = ?').get(targetUserId);
-    if (!targetUser) return res.status(404).json({ error: 'User not found' });
-
-    const hash = await bcrypt.hash(newPassword, 12);
-    const newVersion = (targetUser.password_version || 1) + 1;
+  // ── Migration: auto-assign flagged roles to all existing users who lack any server role ──
+  const autoRoles = db.prepare('SELECT id FROM roles WHERE auto_assign = 1 AND scope = ?').all('server');
+  for (const ar of autoRoles) {
     db.prepare(`
-      UPDATE users SET
-        password_hash = ?,
-        password_version = ?,
-        totp_secret = NULL,
-        totp_enabled = 0,
-        public_key = NULL,
-        encrypted_private_key = NULL,
-        e2e_key_salt = NULL,
-        e2e_secret = NULL
-      WHERE id = ?
-    `).run(hash, newVersion, targetUser.id);
-    db.prepare('DELETE FROM totp_backup_codes WHERE user_id = ?').run(targetUser.id);
-    db.prepare('DELETE FROM account_recovery_codes WHERE user_id = ?').run(targetUser.id);
-
-    const io = req.app.get('io');
-    if (io) {
-      for (const [, s] of io.sockets.sockets) {
-        if (s.user && s.user.id === targetUser.id) {
-          s.emit('force-logout', { reason: 'password_changed' });
-          s.disconnect(true);
-        }
-      }
-    }
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Admin reset password error:', err);
-    res.status(500).json({ error: 'Server error' });
+      INSERT OR IGNORE INTO user_roles (user_id, role_id, server_id, channel_id, granted_by)
+      SELECT u.id, ?, ?, NULL, NULL FROM users u
+      WHERE u.id NOT IN (SELECT DISTINCT user_id FROM user_roles WHERE channel_id IS NULL AND server_id = ?)
+    `).run(ar.id, mainServerId, mainServerId);
   }
-});
 
-// ── Helpers ───────────────────────────────────────────────
+  // ── Cleanup: remove duplicate user_roles (NULL channel_id duplicates) ──
+  // SQLite UNIQUE constraints don't prevent duplicate NULLs, so clean up on startup
+  db.exec(`
+    DELETE FROM user_roles WHERE id NOT IN (
+      SELECT MIN(id) FROM user_roles
+      GROUP BY user_id, role_id, COALESCE(server_id, -1), COALESCE(channel_id, -1)
+    )
+  `);
 
-// ── Verify Password (lightweight, for E2E password prompt) ──
-router.post('/verify-password', async (req, res) => {
+  db.prepare(`
+    UPDATE user_roles
+    SET server_id = ?
+    WHERE channel_id IS NULL
+      AND server_id IS NULL
+      AND user_id IN (SELECT id FROM users WHERE is_admin = 0)
+  `).run(mainServerId);
+
+  // ── Migration: custom_level column on user_roles for per-assignment level overrides ──
   try {
-    const username = sanitizeString(req.body.username, 20);
-    const password = typeof req.body.password === 'string' ? req.body.password : '';
-    if (!username || !password) {
-      return res.status(400).json({ valid: false, error: 'Username and password required' });
-    }
-    const db = getDb();
-    const user = db.prepare('SELECT password_hash FROM users WHERE username = ?').get(username);
-    if (!user) {
-      return res.status(401).json({ valid: false, error: 'Invalid credentials' });
-    }
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) {
-      return res.status(401).json({ valid: false, error: 'Invalid credentials' });
-    }
-    res.json({ valid: true });
-  } catch (err) {
-    console.error('Verify password error:', err);
-    res.status(500).json({ valid: false, error: 'Server error' });
-  }
-});
-
-function verifyToken(token) {
-  try {
-    return jwt.verify(token, JWT_SECRET);
+    db.prepare('SELECT custom_level FROM user_roles LIMIT 0').get();
   } catch {
-    return null;
+    db.exec('ALTER TABLE user_roles ADD COLUMN custom_level INTEGER DEFAULT NULL');
   }
-}
 
-// ── Account Recovery Codes ─────────────────────────────
-// Users generate these in advance. Each is a one-time token that can reset
-// their password (and clear their E2E keys) without admin involvement.
-
-router.get('/recovery-codes/status', async (req, res) => {
-  const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
+  // ── Migration: per-user permission overrides table ──
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_role_perms (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      server_id INTEGER DEFAULT NULL REFERENCES servers(id) ON DELETE CASCADE,
+      channel_id INTEGER DEFAULT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      permission TEXT NOT NULL,
+      allowed INTEGER NOT NULL DEFAULT 1
+    )
+  `);
   try {
-    const decoded = jwt.verify(auth.slice(7), JWT_SECRET);
-    const db = getDb();
-    const count = db.prepare(
-      'SELECT COUNT(*) as count FROM account_recovery_codes WHERE user_id = ? AND used = 0'
-    ).get(decoded.id);
-    res.json({ count: count?.count || 0 });
+    db.prepare('SELECT server_id FROM user_role_perms LIMIT 0').get();
   } catch {
-    res.status(401).json({ error: 'Invalid token' });
+    db.exec('ALTER TABLE user_role_perms ADD COLUMN server_id INTEGER DEFAULT NULL REFERENCES servers(id) ON DELETE CASCADE');
   }
-});
-
-router.post('/recovery-codes/generate', authLimiter, async (req, res) => {
-  const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const decoded = jwt.verify(auth.slice(7), JWT_SECRET);
-    const password = typeof req.body.password === 'string' ? req.body.password : '';
-    if (!password) return res.status(400).json({ error: 'Password required' });
+    db.prepare('SELECT 1 FROM user_role_perms LIMIT 0').get();
+  } catch { /* table just created */ }
+  db.prepare(`
+    UPDATE user_role_perms
+    SET server_id = ?
+    WHERE channel_id IS NULL
+      AND server_id IS NULL
+      AND user_id IN (SELECT id FROM users WHERE is_admin = 0)
+  `).run(mainServerId);
 
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.id);
-    if (!user) return res.status(401).json({ error: 'User not found' });
-
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Incorrect password' });
-
-    // Generate 8 new codes, replacing any existing unused ones
-    const codes = generateBackupCodes(8);
-    db.prepare('DELETE FROM account_recovery_codes WHERE user_id = ?').run(user.id);
-    const insertCode = db.prepare('INSERT INTO account_recovery_codes (user_id, code_hash) VALUES (?, ?)');
-    for (const c of codes) {
-      const hash = await bcrypt.hash(c, 10);
-      insertCode.run(user.id, hash);
-    }
-
-    console.log(`🔑 Recovery codes generated for "${user.username}" from ${req.ip || 'unknown'}`);
-    res.json({ codes });
-  } catch {
-    res.status(401).json({ error: 'Invalid token' });
-  }
-});
-
-router.post('/recover-account', authLimiter, async (req, res) => {
-  try {
-    const username = sanitizeString(req.body.username, 20);
-    const code = typeof req.body.code === 'string' ? req.body.code.trim().toUpperCase() : '';
-    const newPassword = typeof req.body.newPassword === 'string' ? req.body.newPassword : '';
-
-    if (!username || !code || !newPassword) {
-      return res.status(400).json({ error: 'Username, recovery code, and new password required' });
-    }
-    if (newPassword.length < 8) {
-      return res.status(400).json({ error: 'New password must be at least 8 characters' });
-    }
-
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username);
-    if (!user) return res.status(401).json({ error: 'Invalid username or recovery code' });
-
-    // Find a matching unused code
-    const storedCodes = db.prepare(
-      'SELECT id, code_hash FROM account_recovery_codes WHERE user_id = ? AND used = 0'
-    ).all(user.id);
-
-    let matchedId = null;
-    for (const sc of storedCodes) {
-      if (await bcrypt.compare(code, sc.code_hash)) {
-        matchedId = sc.id;
-        break;
-      }
-    }
-    if (!matchedId) return res.status(401).json({ error: 'Invalid username or recovery code' });
-
-    // Mark code used
-    db.prepare('UPDATE account_recovery_codes SET used = 1 WHERE id = ?').run(matchedId);
-
-    // Reset password, bump version, clear E2E keys, clear TOTP
-    const newHash = await bcrypt.hash(newPassword, 12);
-    const newVersion = (user.password_version || 1) + 1;
-    db.prepare(`
-      UPDATE users SET
-        password_hash = ?,
-        password_version = ?,
-        totp_secret = NULL,
-        totp_enabled = 0,
-        public_key = NULL,
-        encrypted_private_key = NULL,
-        e2e_key_salt = NULL,
-        e2e_secret = NULL
-      WHERE id = ?
-    `).run(newHash, newVersion, user.id);
-    db.prepare('DELETE FROM totp_backup_codes WHERE user_id = ?').run(user.id);
-    db.prepare('DELETE FROM account_recovery_codes WHERE user_id = ?').run(user.id);
-
-    console.log(`🔑 Account recovery used for "${user.username}" from ${req.ip || 'unknown'} — E2E keys cleared`);
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Account recovery error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ── Admin Recovery ──────────────────────────────────────
-// Allows the server owner to reclaim admin access using their .env credentials.
-// This is a last-resort mechanism if the admin gets banned, demoted, or locked out.
-// Requires ADMIN_USERNAME and the admin account's password (verified against DB hash).
-router.post('/admin-recover', authLimiter, async (req, res) => {
-  try {
-    const username = sanitizeString(req.body.username, 20);
-    const password = typeof req.body.password === 'string' ? req.body.password : '';
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password required' });
-    }
-
-    // Only the ADMIN_USERNAME from .env can use this endpoint
-    if (username.toLowerCase() !== ADMIN_USERNAME) {
-      return res.status(403).json({ error: 'This endpoint is only available for the server admin account' });
-    }
-
-    const db = getDb();
-    const user = db.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username);
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    // Restore admin status
-    db.prepare('UPDATE users SET is_admin = 1 WHERE id = ?').run(user.id);
-
-    // Remove any active ban on the admin
-    db.prepare('DELETE FROM bans WHERE user_id = ?').run(user.id);
-
-    // Remove any active mute on the admin
-    db.prepare('DELETE FROM mutes WHERE user_id = ?').run(user.id);
-
-    const displayName = user.display_name || user.username;
-    const token = jwt.sign(
-      { id: user.id, username: user.username, isAdmin: true, displayName, pwv: user.password_version || 1 },
-      JWT_SECRET,
-      { expiresIn: '7d' }
+  // ── Migration: push notification subscriptions ──────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      endpoint TEXT NOT NULL,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_id, endpoint)
     );
+    CREATE INDEX IF NOT EXISTS idx_push_subs_user ON push_subscriptions(user_id);
+  `);
 
-    console.log(`🔑 Admin recovery used for "${user.username}" from ${req.ip || 'unknown'}`);
-    res.json({ token, user: { id: user.id, username: user.username, isAdmin: true, displayName } });
-  } catch (err) {
-    console.error('Admin recovery error:', err);
-    res.status(500).json({ error: 'Server error' });
+  // ── Migration: webhooks / bot integrations ───────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS webhooks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      name TEXT NOT NULL DEFAULT 'Bot',
+      token TEXT UNIQUE NOT NULL,
+      avatar_url TEXT DEFAULT NULL,
+      created_by INTEGER REFERENCES users(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      is_active INTEGER DEFAULT 1
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhooks_token ON webhooks(token);
+    CREATE INDEX IF NOT EXISTS idx_webhooks_channel ON webhooks(channel_id);
+  `);
+
+  // ── Migration: mobile FCM push tokens ───────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fcm_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_id, token)
+    );
+    CREATE INDEX IF NOT EXISTS idx_fcm_tokens_user ON fcm_tokens(user_id);
+  `);
+
+  // ── Migration: channel feature toggles & QoL ────────────
+  const channelQolCols = [
+    { name: 'streams_enabled',    sql: "ALTER TABLE channels ADD COLUMN streams_enabled INTEGER DEFAULT 1" },
+    { name: 'music_enabled',      sql: "ALTER TABLE channels ADD COLUMN music_enabled INTEGER DEFAULT 1" },
+    { name: 'slow_mode_interval', sql: "ALTER TABLE channels ADD COLUMN slow_mode_interval INTEGER DEFAULT 0" },
+    { name: 'category',           sql: "ALTER TABLE channels ADD COLUMN category TEXT DEFAULT NULL" },
+    { name: 'sort_alphabetical',  sql: "ALTER TABLE channels ADD COLUMN sort_alphabetical INTEGER DEFAULT 0" },
+    { name: 'cleanup_exempt',     sql: "ALTER TABLE channels ADD COLUMN cleanup_exempt INTEGER DEFAULT 0" },
+    { name: 'special_section',    sql: "ALTER TABLE channels ADD COLUMN special_section TEXT DEFAULT NULL" },
+    { name: 'channel_type',       sql: "ALTER TABLE channels ADD COLUMN channel_type TEXT DEFAULT 'standard'" },
+    { name: 'voice_user_limit',   sql: "ALTER TABLE channels ADD COLUMN voice_user_limit INTEGER DEFAULT 0" },
+    { name: 'media_enabled',      sql: "ALTER TABLE channels ADD COLUMN media_enabled INTEGER DEFAULT 1" },
+    { name: 'notification_type',  sql: "ALTER TABLE channels ADD COLUMN notification_type TEXT DEFAULT 'default'" },
+    { name: 'voice_enabled',     sql: "ALTER TABLE channels ADD COLUMN voice_enabled INTEGER DEFAULT 1" },
+    { name: 'text_enabled',      sql: "ALTER TABLE channels ADD COLUMN text_enabled INTEGER DEFAULT 1" },
+  ];
+  for (const col of channelQolCols) {
+    try { db.prepare(`SELECT ${col.name} FROM channels LIMIT 0`).get(); } catch { db.exec(col.sql); }
   }
-});
 
-function generateToken(payload) {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+  // ── Migration: convert legacy channel_type to individual toggles ──
+  try {
+    const textOnlyChannels = db.prepare("SELECT id FROM channels WHERE channel_type = 'text'").all();
+    if (textOnlyChannels.length > 0) {
+      const update = db.prepare("UPDATE channels SET voice_enabled = 0, channel_type = 'standard' WHERE id = ?");
+      for (const ch of textOnlyChannels) update.run(ch.id);
+    }
+    const voiceOnlyChannels = db.prepare("SELECT id FROM channels WHERE channel_type = 'voice'").all();
+    if (voiceOnlyChannels.length > 0) {
+      const update = db.prepare("UPDATE channels SET text_enabled = 0, channel_type = 'standard' WHERE id = ?");
+      for (const ch of voiceOnlyChannels) update.run(ch.id);
+    }
+  } catch { /* channel_type column may not exist yet on first run */ }
+
+  // ── Migration: E2E public key on users ──────────────────
+  try {
+    db.prepare("SELECT public_key FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN public_key TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: E2E encrypted private key (per-account sync) ──
+  try {
+    db.prepare("SELECT encrypted_private_key FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN encrypted_private_key TEXT DEFAULT NULL");
+  }
+  try {
+    db.prepare("SELECT e2e_key_salt FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN e2e_key_salt TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: E2E account secret (device-independent key wrapping) ──
+  try {
+    db.prepare("SELECT e2e_secret FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN e2e_secret TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: ensure create_channel default threshold ──
+  try {
+    const row = db.prepare("SELECT value FROM server_settings WHERE key = 'permission_thresholds'").get();
+    if (row) {
+      const thresholds = JSON.parse(row.value);
+      if (!thresholds.create_channel) {
+        thresholds.create_channel = 50;
+        db.prepare("UPDATE server_settings SET value = ? WHERE key = 'permission_thresholds'").run(JSON.stringify(thresholds));
+      }
+    }
+  } catch { /* ignore */ }
+
+  // ── Migration: ensure default User role can create forum posts ──
+  try {
+    function generateChannelCode() {
+      let code;
+      do {
+        code = Math.random().toString(16).slice(2, 10).padEnd(8, '0').slice(0, 8);
+      } while (db.prepare('SELECT 1 FROM channels WHERE code = ?').get(code));
+      return code;
+    }
+
+    const announcementsChannel = db.prepare("SELECT id FROM channels WHERE special_section = 'announcements' LIMIT 1").get();
+    const announcementsChannelId = announcementsChannel?.id || (() => {
+      const result = db.prepare(`
+        INSERT INTO channels (
+          name, code, server_id, created_by, special_section, notification_type,
+          channel_type, text_enabled, media_enabled, voice_enabled, position
+        ) VALUES (?, ?, ?, NULL, 'announcements', 'announcement', 'standard', 1, 1, 0, -100)
+      `).run('Admin Announcements', generateChannelCode(), mainServerId);
+      return result.lastInsertRowid;
+    })();
+
+    db.prepare(`
+      UPDATE channels
+      SET name = ?, server_id = ?, special_section = 'announcements', notification_type = 'announcement',
+          text_enabled = 1, media_enabled = 1, voice_enabled = 0
+      WHERE id = ?
+    `).run('Admin Announcements', mainServerId, announcementsChannelId);
+
+    db.prepare(`
+      INSERT OR IGNORE INTO channel_members (channel_id, user_id)
+      SELECT ?, id FROM users
+    `).run(announcementsChannelId);
+
+    const userRole = db.prepare("SELECT id FROM roles WHERE name = 'User' AND level = 1 AND scope = 'server'").get();
+    if (userRole) {
+      db.prepare("INSERT OR IGNORE INTO role_permissions (role_id, permission, allowed) VALUES (?, 'create_forum_posts', 1)").run(userRole.id);
+    }
+  } catch { /* ignore */ }
+
+  // ── Migration: imported_from column on messages (Discord import) ──
+  try {
+    db.prepare("SELECT imported_from FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN imported_from TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: per-server home channel ──
+  try {
+    db.prepare("SELECT home_channel_id FROM servers LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE servers ADD COLUMN home_channel_id INTEGER DEFAULT NULL REFERENCES channels(id) ON DELETE SET NULL");
+  }
+  try {
+    const servers = db.prepare('SELECT id, home_channel_id FROM servers').all();
+    const updateHome = db.prepare(`
+      UPDATE servers
+      SET home_channel_id = (
+        SELECT id FROM channels
+        WHERE server_id = ? AND is_dm = 0 AND special_section IS NULL
+        ORDER BY CASE WHEN parent_channel_id IS NULL THEN 0 ELSE 1 END, position, id
+        LIMIT 1
+      )
+      WHERE id = ?
+    `);
+    for (const server of servers) {
+      if (!server.home_channel_id) updateHome.run(server.id, server.id);
+    }
+  } catch { /* ignore */ }
+
+  // ── Migration: webhook_avatar column on messages (Discord import avatars) ──
+  try {
+    db.prepare("SELECT webhook_avatar FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN webhook_avatar TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: archived / protected messages ────────────
+  try {
+    db.prepare("SELECT is_archived FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN is_archived INTEGER DEFAULT 0");
+  }
+
+  // ── Migration: password_version for session invalidation ──
+  try {
+    db.prepare("SELECT password_version FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN password_version INTEGER DEFAULT 1");
+  }
+
+  // ── Migration: role-based channel access ────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS role_channel_access (
+      role_id    INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      grant_on_promote  INTEGER NOT NULL DEFAULT 0,
+      revoke_on_demote  INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (role_id, channel_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_rca_role ON role_channel_access(role_id);
+    CREATE INDEX IF NOT EXISTS idx_rca_channel ON role_channel_access(channel_id);
+  `);
+
+  // ── Migration: link_channel_access flag on roles ────────
+  try {
+    db.prepare("SELECT link_channel_access FROM roles LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE roles ADD COLUMN link_channel_access INTEGER NOT NULL DEFAULT 0");
+  }
+
+  // ── Migration: TOTP 2FA columns on users ────────────────
+  try {
+    db.prepare("SELECT totp_secret FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT NULL");
+  }
+  try {
+    db.prepare("SELECT totp_enabled FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0");
+  }
+
+  // ── Migration: TOTP backup codes table ──────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS totp_backup_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      code_hash TEXT NOT NULL,
+      used INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_totp_backup_user ON totp_backup_codes(user_id);
+  `);
+
+  // ── Migration: account recovery codes ──────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS account_recovery_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      code_hash TEXT NOT NULL,
+      used INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_recovery_codes_user ON account_recovery_codes(user_id);
+  `);
+
+  // ── Migration: polls support ─────────────────────────
+  try {
+    db.exec("ALTER TABLE messages ADD COLUMN poll_data TEXT DEFAULT NULL");
+  } catch (e) { /* column already exists */ }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS poll_votes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      option_index INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(message_id, user_id, option_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_poll_votes_msg ON poll_votes(message_id);
+  `);
+
+  // ── Migration: deleted_users log (audit trail for admin deletions) ──
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS deleted_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL,
+      display_name TEXT DEFAULT NULL,
+      reason TEXT DEFAULT '',
+      deleted_by INTEGER REFERENCES users(id),
+      deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  // ── Migration: per-channel voice bitrate cap ────────────
+  try {
+    db.prepare("SELECT voice_bitrate FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN voice_bitrate INTEGER DEFAULT 0");
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS proxies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      proxy_type TEXT NOT NULL DEFAULT 'alter',
+      bio TEXT DEFAULT '',
+      avatar_url TEXT DEFAULT NULL,
+      trigger_prefix TEXT NOT NULL,
+      trigger_suffix TEXT DEFAULT '',
+      group_name TEXT DEFAULT '',
+      is_public INTEGER NOT NULL DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_proxies_user ON proxies(user_id);
+    CREATE INDEX IF NOT EXISTS idx_proxies_user_trigger ON proxies(user_id, trigger_prefix);
+  `);
+  try {
+    db.prepare("SELECT proxy_type FROM proxies LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE proxies ADD COLUMN proxy_type TEXT NOT NULL DEFAULT 'alter'");
+  }
+
+  try {
+    db.prepare("SELECT proxy_id FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN proxy_id INTEGER DEFAULT NULL REFERENCES proxies(id) ON DELETE SET NULL");
+  }
+  try {
+    db.prepare("SELECT proxy_name FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN proxy_name TEXT DEFAULT NULL");
+  }
+  try {
+    db.prepare("SELECT proxy_avatar FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN proxy_avatar TEXT DEFAULT NULL");
+  }
+  try {
+    db.prepare("SELECT proxy_type FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN proxy_type TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: grant use_tts to all auto-assign roles (default ON) ──
+  try {
+    const autoAssignRoles = db.prepare('SELECT id FROM roles WHERE auto_assign = 1').all();
+    const insertPerm = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, permission, allowed) VALUES (?, ?, 1)');
+    for (const r of autoAssignRoles) {
+      insertPerm.run(r.id, 'use_tts');
+    }
+  } catch { /* non-critical */ }
+
+  return db;
 }
 
-function generateChannelCode() {
-  return crypto.randomBytes(4).toString('hex'); // 8-char hex string
+function getDb() {
+  return db;
 }
 
-module.exports = { router, verifyToken, generateChannelCode, generateToken, authLimiter };
+module.exports = { initDatabase, getDb };
