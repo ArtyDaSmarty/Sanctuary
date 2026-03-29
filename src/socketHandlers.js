@@ -630,6 +630,30 @@ function setupSocketHandlers(io, db) {
     targetSocket.emit('servers-list', getVisibleServers(targetSocket.user.id, targetSocket.user.isAdmin));
   }
 
+  function getBlockedUserIds(userId) {
+    return db.prepare('SELECT blocked_user_id FROM user_blocks WHERE user_id = ?').all(userId).map(r => r.blocked_user_id);
+  }
+
+  function getMutedUserIds(userId) {
+    return db.prepare('SELECT muted_user_id FROM user_mutes WHERE user_id = ?').all(userId).map(r => r.muted_user_id);
+  }
+
+  function hasUserBlocked(userId, otherUserId) {
+    return !!db.prepare('SELECT 1 FROM user_blocks WHERE user_id = ? AND blocked_user_id = ?').get(userId, otherUserId);
+  }
+
+  function getServerMute(userId, serverId) {
+    if (!serverId) return null;
+    return db.prepare(
+      "SELECT id, expires_at FROM server_mutes WHERE server_id = ? AND user_id = ? AND expires_at > datetime('now') ORDER BY expires_at DESC LIMIT 1"
+    ).get(serverId, userId);
+  }
+
+  function isServerBanned(userId, serverId) {
+    if (!serverId) return false;
+    return !!db.prepare('SELECT 1 FROM server_bans WHERE server_id = ? AND user_id = ?').get(serverId, userId);
+  }
+
   // ── Socket connection rate limiting (per IP) ────────────
   const connTracker = new Map(); // ip → { count, resetTime }
   const MAX_CONN_PER_MIN = 15;
@@ -952,6 +976,8 @@ function setupSocketHandlers(io, db) {
       roles: socket.user.roles || [],
       effectiveLevel: socket.user.effectiveLevel || 0,
       permissions: getUserPermissions(socket.user.id),
+      blockedUserIds: getBlockedUserIds(socket.user.id),
+      mutedUserIds: getMutedUserIds(socket.user.id),
       status: socket.user.status || 'online',
       statusText: socket.user.statusText || ''
     });
@@ -1052,8 +1078,16 @@ function setupSocketHandlers(io, db) {
           FROM channels c
           JOIN channel_members cm ON c.id = cm.channel_id
           WHERE cm.user_id = ?
+            AND (
+              c.is_dm = 1
+              OR c.server_id IS NULL
+              OR NOT EXISTS (
+                SELECT 1 FROM server_bans sb
+                WHERE sb.user_id = ? AND sb.server_id = c.server_id
+              )
+            )
           ORDER BY c.is_dm, c.position, c.name
-        `).all(userId);
+        `).all(userId, userId);
       }
 
       if (channels.length > 0) {
@@ -1361,6 +1395,9 @@ function setupSocketHandlers(io, db) {
       // ── Check if this is a sub-server invite code ─────
       const serverInvite = db.prepare('SELECT * FROM servers WHERE code = ?').get(code);
       if (serverInvite) {
+        if (!socket.user.isAdmin && isServerBanned(socket.user.id, serverInvite.id)) {
+          return socket.emit('error-msg', 'You are banned from that server');
+        }
         // Server code: add user to all top-level non-private channels in that server
         const allParents = db.prepare(
           'SELECT id, code FROM channels WHERE server_id = ? AND parent_channel_id IS NULL AND is_dm = 0 AND is_private = 0'
@@ -1396,6 +1433,9 @@ function setupSocketHandlers(io, db) {
       const channel = db.prepare('SELECT * FROM channels WHERE code = ?').get(code);
       if (!channel) {
         return socket.emit('error-msg', 'Invalid channel code — double-check it');
+      }
+      if (!socket.user.isAdmin && channel.server_id && isServerBanned(socket.user.id, channel.server_id)) {
+        return socket.emit('error-msg', 'You are banned from that server');
       }
 
       // Add membership if not already a member
@@ -1699,6 +1739,7 @@ function setupSocketHandlers(io, db) {
         });
       }
 
+      const blockedIds = new Set(getBlockedUserIds(socket.user.id));
       const enriched = messages.map(m => {
         const obj = { ...m };
         // Normalize SQLite UTC timestamps to proper ISO 8601 with Z suffix
@@ -1744,7 +1785,7 @@ function setupSocketHandlers(io, db) {
           obj.username = m.webhook_username || 'Unknown';
         }
         return obj;
-      });
+      }).filter(m => !m.user_id || !blockedIds.has(m.user_id));
 
       socket.emit('message-history', {
         channelCode: code,
@@ -1805,18 +1846,28 @@ function setupSocketHandlers(io, db) {
       const activeMute = db.prepare(
         'SELECT id, expires_at FROM mutes WHERE user_id = ? AND expires_at > datetime(\'now\') ORDER BY expires_at DESC LIMIT 1'
       ).get(socket.user.id);
-      if (activeMute) {
+      const channel = db.prepare('SELECT id, name, slow_mode_interval, text_enabled, voice_enabled, media_enabled, special_section, is_dm, server_id FROM channels WHERE code = ?').get(code);
+      if (activeMute && channel && !channel.is_dm) {
         const remaining = Math.ceil((new Date(activeMute.expires_at + 'Z') - Date.now()) / 60000);
         return socket.emit('error-msg', `You are muted for ${remaining} more minute${remaining !== 1 ? 's' : ''}`);
       }
-
-      const channel = db.prepare('SELECT id, name, slow_mode_interval, text_enabled, voice_enabled, media_enabled, special_section FROM channels WHERE code = ?').get(code);
+      const serverMute = channel ? getServerMute(socket.user.id, channel.server_id) : null;
+      if (serverMute && !channel.is_dm) {
+        const remaining = Math.ceil((new Date(serverMute.expires_at + 'Z') - Date.now()) / 60000);
+        return socket.emit('error-msg', `You are server-muted for ${remaining} more minute${remaining !== 1 ? 's' : ''}`);
+      }
       if (!channel) return socket.emit('error-msg', 'Channel not found — try switching channels and back');
 
       const member = db.prepare(
         'SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?'
       ).get(channel.id, socket.user.id);
       if (!member) return socket.emit('error-msg', 'Not a member of this channel');
+      if (channel.is_dm) {
+        const otherMember = db.prepare('SELECT user_id FROM channel_members WHERE channel_id = ? AND user_id != ? LIMIT 1').get(channel.id, socket.user.id);
+        if (otherMember && (hasUserBlocked(socket.user.id, otherMember.user_id) || hasUserBlocked(otherMember.user_id, socket.user.id))) {
+          return socket.emit('error-msg', 'You cannot message this user');
+        }
+      }
       if (channel.special_section === 'announcements' && !socket.user.isAdmin) {
         return socket.emit('error-msg', 'Only the instance admin can post in Admin Announcements');
       }
@@ -3969,6 +4020,130 @@ function setupSocketHandlers(io, db) {
       socket.emit('error-msg', `Unmuted ${targetUser ? targetUser.username : 'user'}`);
     });
 
+    socket.on('server-kick-user', (data) => {
+      if (!data || typeof data !== 'object') return;
+      const serverId = isInt(data.serverId) ? data.serverId : null;
+      const targetUserId = isInt(data.userId) ? data.userId : null;
+      if (!serverId || !targetUserId) return;
+      if (!socket.user.isAdmin && !userHasServerPermission(socket.user.id, 'kick_user', serverId)) {
+        return socket.emit('error-msg', 'You do not have permission to kick users from this server');
+      }
+      if (targetUserId === socket.user.id) return socket.emit('error-msg', 'You cannot kick yourself');
+
+      const server = db.prepare('SELECT id, name FROM servers WHERE id = ?').get(serverId);
+      const targetUser = db.prepare('SELECT id, is_admin, COALESCE(display_name, username) as username FROM users WHERE id = ?').get(targetUserId);
+      if (!server || !targetUser) return socket.emit('error-msg', 'User or server not found');
+      if (targetUser.is_admin && !socket.user.isAdmin) return socket.emit('error-msg', 'You cannot kick an admin');
+
+      if (!socket.user.isAdmin) {
+        const sampleChannel = db.prepare('SELECT id FROM channels WHERE server_id = ? AND is_dm = 0 ORDER BY id LIMIT 1').get(serverId);
+        const myLevel = getUserEffectiveLevel(socket.user.id, sampleChannel?.id || null);
+        const targetLevel = getUserEffectiveLevel(targetUserId, sampleChannel?.id || null);
+        if (targetLevel >= myLevel) return socket.emit('error-msg', 'You cannot kick a user with equal or higher rank');
+      }
+
+      const serverChannels = db.prepare('SELECT id, code FROM channels WHERE server_id = ? AND is_dm = 0').all(serverId);
+      const removeMemberships = db.prepare('DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?');
+      serverChannels.forEach(ch => removeMemberships.run(ch.id, targetUserId));
+
+      const targetSockets = [...io.sockets.sockets.values()].filter(s => s.user && s.user.id === targetUserId);
+      for (const ts of targetSockets) {
+        serverChannels.forEach(ch => ts.leave(`channel:${ch.code}`));
+        ts.emit('channels-list', getEnrichedChannels(targetUserId, ts.user.isAdmin, (room) => ts.join(room)));
+        emitServersList(ts);
+        ts.emit('toast', { message: `You were kicked from ${server.name}`, type: 'warning' });
+        if (ts.currentChannel) {
+          const current = db.prepare('SELECT server_id FROM channels WHERE code = ?').get(ts.currentChannel);
+          if (current?.server_id === serverId) {
+            const fallback = getEnrichedChannels(targetUserId, ts.user.isAdmin).find(c => !c.is_dm);
+            if (fallback) ts.emit('server-joined', { serverId: fallback.server_id, firstChannelCode: fallback.code });
+          }
+        }
+      }
+
+      socket.emit('error-msg', `Server kicked ${targetUser.username}`);
+      emitServersList(socket);
+    });
+
+    socket.on('server-ban-user', (data) => {
+      if (!data || typeof data !== 'object') return;
+      const serverId = isInt(data.serverId) ? data.serverId : null;
+      const targetUserId = isInt(data.userId) ? data.userId : null;
+      if (!serverId || !targetUserId) return;
+      if (!socket.user.isAdmin && !userHasServerPermission(socket.user.id, 'ban_user', serverId)) {
+        return socket.emit('error-msg', 'You do not have permission to ban users from this server');
+      }
+      if (targetUserId === socket.user.id) return socket.emit('error-msg', 'You cannot ban yourself');
+
+      const server = db.prepare('SELECT id, name FROM servers WHERE id = ?').get(serverId);
+      const targetUser = db.prepare('SELECT id, is_admin, COALESCE(display_name, username) as username FROM users WHERE id = ?').get(targetUserId);
+      if (!server || !targetUser) return socket.emit('error-msg', 'User or server not found');
+      if (targetUser.is_admin && !socket.user.isAdmin) return socket.emit('error-msg', 'You cannot ban an admin');
+
+      if (!socket.user.isAdmin) {
+        const sampleChannel = db.prepare('SELECT id FROM channels WHERE server_id = ? AND is_dm = 0 ORDER BY id LIMIT 1').get(serverId);
+        const myLevel = getUserEffectiveLevel(socket.user.id, sampleChannel?.id || null);
+        const targetLevel = getUserEffectiveLevel(targetUserId, sampleChannel?.id || null);
+        if (targetLevel >= myLevel) return socket.emit('error-msg', 'You cannot ban a user with equal or higher rank');
+      }
+
+      db.prepare('INSERT OR REPLACE INTO server_bans (server_id, user_id, banned_by, reason) VALUES (?, ?, ?, ?)')
+        .run(serverId, targetUserId, socket.user.id, typeof data.reason === 'string' ? data.reason.trim().slice(0, 200) : '');
+      db.prepare('DELETE FROM server_mutes WHERE server_id = ? AND user_id = ?').run(serverId, targetUserId);
+
+      const serverChannels = db.prepare('SELECT id, code FROM channels WHERE server_id = ? AND is_dm = 0').all(serverId);
+      const removeMemberships = db.prepare('DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?');
+      serverChannels.forEach(ch => removeMemberships.run(ch.id, targetUserId));
+
+      const targetSockets = [...io.sockets.sockets.values()].filter(s => s.user && s.user.id === targetUserId);
+      for (const ts of targetSockets) {
+        serverChannels.forEach(ch => ts.leave(`channel:${ch.code}`));
+        ts.emit('channels-list', getEnrichedChannels(targetUserId, ts.user.isAdmin, (room) => ts.join(room)));
+        emitServersList(ts);
+        ts.emit('toast', { message: `You were banned from ${server.name}`, type: 'warning' });
+      }
+
+      socket.emit('error-msg', `Server banned ${targetUser.username}`);
+    });
+
+    socket.on('server-mute-user', (data) => {
+      if (!data || typeof data !== 'object') return;
+      const serverId = isInt(data.serverId) ? data.serverId : null;
+      const targetUserId = isInt(data.userId) ? data.userId : null;
+      if (!serverId || !targetUserId) return;
+      if (!socket.user.isAdmin && !userHasServerPermission(socket.user.id, 'mute_user', serverId)) {
+        return socket.emit('error-msg', 'You do not have permission to mute users in this server');
+      }
+      if (targetUserId === socket.user.id) return socket.emit('error-msg', 'You cannot mute yourself');
+
+      const server = db.prepare('SELECT id, name FROM servers WHERE id = ?').get(serverId);
+      const targetUser = db.prepare('SELECT id, is_admin, COALESCE(display_name, username) as username FROM users WHERE id = ?').get(targetUserId);
+      if (!server || !targetUser) return socket.emit('error-msg', 'User or server not found');
+      if (targetUser.is_admin && !socket.user.isAdmin) return socket.emit('error-msg', 'You cannot mute an admin');
+
+      if (!socket.user.isAdmin) {
+        const sampleChannel = db.prepare('SELECT id FROM channels WHERE server_id = ? AND is_dm = 0 ORDER BY id LIMIT 1').get(serverId);
+        const myLevel = getUserEffectiveLevel(socket.user.id, sampleChannel?.id || null);
+        const targetLevel = getUserEffectiveLevel(targetUserId, sampleChannel?.id || null);
+        if (targetLevel >= myLevel) return socket.emit('error-msg', 'You cannot mute a user with equal or higher rank');
+      }
+
+      const durationMinutes = isInt(data.duration) && data.duration > 0 && data.duration <= 43200 ? data.duration : 10;
+      db.prepare('DELETE FROM server_mutes WHERE server_id = ? AND user_id = ?').run(serverId, targetUserId);
+      db.prepare(`
+        INSERT INTO server_mutes (server_id, user_id, muted_by, reason, expires_at)
+        VALUES (?, ?, ?, ?, datetime('now', ?))
+      `).run(serverId, targetUserId, socket.user.id, typeof data.reason === 'string' ? data.reason.trim().slice(0, 200) : '', `+${durationMinutes} minutes`);
+
+      for (const [, s] of io.sockets.sockets) {
+        if (s.user && s.user.id === targetUserId) {
+          s.emit('muted', { duration: durationMinutes, reason: `Muted in ${server.name}` });
+        }
+      }
+
+      socket.emit('error-msg', `Server muted ${targetUser.username} for ${durationMinutes} min`);
+    });
+
     // ═══════════════ ADMIN: GET BAN LIST ════════════════════
 
     socket.on('get-bans', () => {
@@ -4144,7 +4319,7 @@ function setupSocketHandlers(io, db) {
       const key = typeof data.key === 'string' ? data.key.trim() : '';
       const value = typeof data.value === 'string' ? data.value.trim() : '';
 
-      const allowedKeys = ['member_visibility', 'cleanup_enabled', 'cleanup_max_age_days', 'cleanup_max_size_mb', 'cleanup_messages_mb', 'cleanup_attachments_mb', 'cleanup_emojis_mb', 'cleanup_sounds_mb', 'cleanup_proxy_avatars_mb', 'giphy_api_key', 'server_name', 'server_title', 'server_icon', 'permission_thresholds', 'tunnel_enabled', 'tunnel_provider', 'server_code', 'max_upload_mb', 'max_poll_options', 'max_sound_kb', 'max_emoji_kb', 'max_proxy_avatar_kb', 'setup_wizard_complete', 'default_theme', 'channel_sort_mode'];
+      const allowedKeys = ['member_visibility', 'cleanup_enabled', 'cleanup_max_age_days', 'cleanup_max_size_mb', 'cleanup_messages_mb', 'cleanup_attachments_mb', 'cleanup_emojis_mb', 'cleanup_sounds_mb', 'cleanup_proxy_avatars_mb', 'giphy_api_key', 'server_name', 'server_title', 'server_icon', 'display_version', 'permission_thresholds', 'tunnel_enabled', 'tunnel_provider', 'server_code', 'max_upload_mb', 'max_poll_options', 'max_sound_kb', 'max_emoji_kb', 'max_proxy_avatar_kb', 'setup_wizard_complete', 'default_theme', 'channel_sort_mode'];
       if (!allowedKeys.includes(key)) return;
 
       if (key === 'member_visibility' && !['all', 'online', 'none'].includes(value)) return;
@@ -4190,6 +4365,9 @@ function setupSocketHandlers(io, db) {
       }
       if (key === 'server_title') {
         if (value.length > 40) return;
+      }
+      if (key === 'display_version') {
+        if (value.length > 20) return;
       }
       if (key === 'server_icon') {
         if (value && !isValidUploadPath(value)) return;
@@ -5148,6 +5326,9 @@ function setupSocketHandlers(io, db) {
         'SELECT u.id, COALESCE(u.display_name, u.username) as username FROM users u LEFT JOIN bans b ON u.id = b.user_id WHERE u.id = ? AND b.id IS NULL'
       ).get(targetId);
       if (!target) return socket.emit('error-msg', 'User not found');
+      if (hasUserBlocked(socket.user.id, targetId) || hasUserBlocked(targetId, socket.user.id)) {
+        return socket.emit('error-msg', 'You cannot DM this user');
+      }
 
       // Check if DM channel already exists between these two users
       const existingDm = db.prepare(`
@@ -6579,8 +6760,8 @@ function setupSocketHandlers(io, db) {
 
       try {
         const result = db.prepare(
-          'INSERT INTO channels (name, code, created_by, parent_channel_id, position, is_private, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        ).run(name, code, socket.user.id, parentChannel.id, position, isPrivate, expiresAt);
+          'INSERT INTO channels (name, code, server_id, created_by, parent_channel_id, position, is_private, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        ).run(name, code, parentChannel.server_id || null, socket.user.id, parentChannel.id, position, isPrivate, expiresAt);
 
         // Auto-join all members of the parent channel (even for private — creator controls who's in)
         const parentMembers = db.prepare('SELECT user_id FROM channel_members WHERE channel_id = ?').all(parentChannel.id);
@@ -6732,6 +6913,47 @@ function setupSocketHandlers(io, db) {
       if (channel) channel.display_code = channel.code;
       cb?.({ ok: true, channel });
       broadcastChannelLists();
+    });
+
+    socket.on('block-user', (data) => {
+      const targetId = isInt(data?.userId) ? data.userId : null;
+      if (!targetId || targetId === socket.user.id) return;
+      db.prepare('INSERT OR IGNORE INTO user_blocks (user_id, blocked_user_id) VALUES (?, ?)').run(socket.user.id, targetId);
+      db.prepare('DELETE FROM user_mutes WHERE user_id = ? AND muted_user_id = ?').run(socket.user.id, targetId);
+      socket.emit('user-relations-updated', {
+        blockedUserIds: getBlockedUserIds(socket.user.id),
+        mutedUserIds: getMutedUserIds(socket.user.id)
+      });
+    });
+
+    socket.on('unblock-user', (data) => {
+      const targetId = isInt(data?.userId) ? data.userId : null;
+      if (!targetId) return;
+      db.prepare('DELETE FROM user_blocks WHERE user_id = ? AND blocked_user_id = ?').run(socket.user.id, targetId);
+      socket.emit('user-relations-updated', {
+        blockedUserIds: getBlockedUserIds(socket.user.id),
+        mutedUserIds: getMutedUserIds(socket.user.id)
+      });
+    });
+
+    socket.on('mute-user-personal', (data) => {
+      const targetId = isInt(data?.userId) ? data.userId : null;
+      if (!targetId || targetId === socket.user.id) return;
+      db.prepare('INSERT OR IGNORE INTO user_mutes (user_id, muted_user_id) VALUES (?, ?)').run(socket.user.id, targetId);
+      socket.emit('user-relations-updated', {
+        blockedUserIds: getBlockedUserIds(socket.user.id),
+        mutedUserIds: getMutedUserIds(socket.user.id)
+      });
+    });
+
+    socket.on('unmute-user-personal', (data) => {
+      const targetId = isInt(data?.userId) ? data.userId : null;
+      if (!targetId) return;
+      db.prepare('DELETE FROM user_mutes WHERE user_id = ? AND muted_user_id = ?').run(socket.user.id, targetId);
+      socket.emit('user-relations-updated', {
+        blockedUserIds: getBlockedUserIds(socket.user.id),
+        mutedUserIds: getMutedUserIds(socket.user.id)
+      });
     });
 
     socket.on('create-forum-post', (data, cb) => {
