@@ -1298,6 +1298,9 @@
           <button class="btn-sm btn-accent" id="proxy-add-btn">+ New Proxy</button>
           <span class="settings-hint" id="proxy-settings-status"></span>
         </div>
+        <div style="margin-top:8px;">
+          <button class="btn-sm btn-full" id="proxy-manage-btn">View All Proxies</button>
+        </div>
         <div id="proxy-settings-list" class="proxy-settings-list">
           <p class="muted-text">Loading proxies...</p>
         </div>
@@ -1581,6 +1584,12 @@
           <label class="select-row" style="margin-top:8px">
             <span>Server Name</span>
             <input type="text" id="subserver-name-input" maxlength="30" class="settings-text-input" style="max-width:180px" placeholder="Server name">
+          </label>
+          <label class="select-row" style="margin-top:8px">
+            <span>Home Channel</span>
+            <select id="subserver-home-channel" style="max-width:180px">
+              <option value="">Select a home channel</option>
+            </select>
           </label>
           <div class="server-icon-upload-area">
             <div class="server-icon-preview" id="subserver-icon-preview">
@@ -2433,6 +2442,19 @@
 
       <div class="modal-actions">
         <button class="btn-sm btn-accent" id="dm-organize-done-btn">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="proxy-manager-modal" style="display:none">
+    <div class="modal" style="max-width:760px">
+      <h3>🎭 Proxy Library</h3>
+      <p class="settings-hint" style="margin-bottom:10px">Edit or delete your proxies here without crowding the main settings page.</p>
+      <div id="proxy-manager-list" class="proxy-settings-list">
+        <p class="muted-text">Loading proxies...</p>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-sm" id="proxy-manager-close-btn">Close</button>
       </div>
     </div>
   </div>
