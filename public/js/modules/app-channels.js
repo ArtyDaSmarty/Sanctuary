@@ -1331,6 +1331,8 @@ _renderWebhookList(webhooks, channelCode) {
 _renderChannels() {
   const list = document.getElementById('channel-list');
   list.innerHTML = '';
+  const sidebarSplit = document.getElementById('sidebar-split');
+  const channelsPane = document.getElementById('channels-pane');
 
   if (!this.currentServerId && this.servers?.length) {
     this.currentServerId = this.servers[0].id;
@@ -1372,6 +1374,8 @@ _renderChannels() {
   }
   const dmPane = document.getElementById('dm-pane');
   if (showingAnnouncements) {
+    if (sidebarSplit) sidebarSplit.classList.add('dm-hidden');
+    if (channelsPane) channelsPane.style.flex = '1 1 0';
     if (announcementChannel) {
       const el = document.createElement('div');
       el.className = 'channel-item' + (announcementChannel.code === this.currentChannel ? ' active' : '');
@@ -1393,6 +1397,8 @@ _renderChannels() {
     return;
   }
   if (showingDms) {
+    if (sidebarSplit) sidebarSplit.classList.add('dm-hidden');
+    if (channelsPane) channelsPane.style.flex = '1 1 0';
     dmChannels.forEach(ch => {
       const el = document.createElement('div');
       el.className = 'channel-item dm-item' + (ch.code === this.currentChannel ? ' active' : '');
@@ -1413,6 +1419,8 @@ _renderChannels() {
     this._updateAnnouncementSectionBadge();
     return;
   }
+  if (sidebarSplit) sidebarSplit.classList.add('dm-hidden');
+  if (channelsPane) channelsPane.style.flex = '1 1 0';
   if (dmPane) dmPane.style.display = 'none';
 
   // Sort sub-channels — respect parent's sort_alphabetical setting & per-tag overrides
