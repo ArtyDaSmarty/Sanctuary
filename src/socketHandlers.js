@@ -1518,6 +1518,7 @@ function setupSocketHandlers(io, db) {
         id: channel.id,
         name: channel.name,
         code: activeCode,
+        server_id: channel.server_id || null,
         display_code: (isPrivateCode && !joinerCanSeeCode) ? '••••••••' : activeCode,
         created_by: channel.created_by,
         topic: channel.topic || '',
@@ -6898,12 +6899,13 @@ function setupSocketHandlers(io, db) {
       socket.join(`channel:${post.code}`);
 
       const channel = db.prepare(`
-        SELECT c.id, c.name, c.code, c.created_by, c.topic, c.is_dm,
+        SELECT c.id, c.name, c.code, COALESCE(c.server_id, p.server_id) AS server_id, c.created_by, c.topic, c.is_dm,
                c.code_visibility, c.code_mode, c.code_rotation_type, c.code_rotation_interval,
                c.parent_channel_id, c.position, c.is_private, c.expires_at,
                c.streams_enabled, c.music_enabled, c.media_enabled, c.slow_mode_interval, c.category, c.sort_alphabetical,
                c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate
         FROM channels c
+        LEFT JOIN channels p ON p.id = c.parent_channel_id
         WHERE c.id = ?
       `).get(post.id);
       if (channel) channel.display_code = channel.code;
@@ -6983,9 +6985,9 @@ function setupSocketHandlers(io, db) {
 
       try {
         const result = db.prepare(`
-          INSERT INTO channels (name, code, created_by, parent_channel_id, position, is_private, expires_at, category)
-          VALUES (?, ?, ?, ?, ?, 0, NULL, ?)
-        `).run(title, code, socket.user.id, parent.id, position, tag || null);
+          INSERT INTO channels (name, code, server_id, created_by, parent_channel_id, position, is_private, expires_at, category)
+          VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?)
+        `).run(title, code, parent.server_id || null, socket.user.id, parent.id, position, tag || null);
 
         db.prepare('INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?, ?)').run(result.lastInsertRowid, socket.user.id);
         socket.join(`channel:${code}`);
@@ -6997,12 +6999,13 @@ function setupSocketHandlers(io, db) {
         db.prepare('INSERT INTO pinned_messages (message_id, channel_id, pinned_by) VALUES (?, ?, ?)').run(messageResult.lastInsertRowid, result.lastInsertRowid, socket.user.id);
 
         const channel = db.prepare(`
-          SELECT c.id, c.name, c.code, c.created_by, c.topic, c.is_dm,
+          SELECT c.id, c.name, c.code, COALESCE(c.server_id, p.server_id) AS server_id, c.created_by, c.topic, c.is_dm,
                  c.code_visibility, c.code_mode, c.code_rotation_type, c.code_rotation_interval,
                  c.parent_channel_id, c.position, c.is_private, c.expires_at,
                  c.streams_enabled, c.music_enabled, c.media_enabled, c.slow_mode_interval, c.category, c.sort_alphabetical,
                  c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate
           FROM channels c
+          LEFT JOIN channels p ON p.id = c.parent_channel_id
           WHERE c.id = ?
         `).get(result.lastInsertRowid);
         if (channel) channel.display_code = channel.code;

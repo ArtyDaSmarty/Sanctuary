@@ -234,6 +234,24 @@ function initDatabase() {
     db.exec("ALTER TABLE channels ADD COLUMN server_id INTEGER DEFAULT NULL REFERENCES servers(id) ON DELETE CASCADE");
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_channels_server_id ON channels(server_id)");
+  // Backfill child-channel server ownership from the parent so forum posts and
+  // sub-channels behave consistently in the multi-server UI.
+  db.exec(`
+    UPDATE channels
+    SET server_id = (
+      SELECT parent.server_id
+      FROM channels AS parent
+      WHERE parent.id = channels.parent_channel_id
+    )
+    WHERE server_id IS NULL
+      AND parent_channel_id IS NOT NULL
+      AND EXISTS (
+        SELECT 1
+        FROM channels AS parent
+        WHERE parent.id = channels.parent_channel_id
+          AND parent.server_id IS NOT NULL
+      )
+  `);
   try {
     db.prepare("SELECT legacy_name FROM servers LIMIT 0").get();
   } catch {

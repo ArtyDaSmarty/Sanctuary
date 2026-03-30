@@ -1365,7 +1365,9 @@ _renderChannels() {
 
   if (this.currentChannel) {
     const current = this.channels.find(c => c.code === this.currentChannel);
-    if (current && !showingDms && !showingAnnouncements && !current.is_dm && !current.special_section && current.server_id !== this.currentServerId) {
+    const currentParent = current?.parent_channel_id ? this.channels.find(c => c.id === current.parent_channel_id) : null;
+    const effectiveCurrentServerId = current?.server_id || currentParent?.server_id || null;
+    if (current && !showingDms && !showingAnnouncements && !current.is_dm && !current.special_section && effectiveCurrentServerId !== this.currentServerId) {
       const fallback = regularChannels[0];
       if (fallback) {
         this.currentChannel = fallback.code;
