@@ -1153,37 +1153,62 @@ _setupUI() {
   });
   document.getElementById('forum-create-post-btn')?.addEventListener('click', () => {
     const modal = document.getElementById('forum-post-modal');
+    this._editingForumPostCode = null;
     const parent = this.channels.find(c => c.code === this._forumView?.parentCode);
+    document.getElementById('forum-post-modal-title').textContent = 'Create Forum Post';
     document.getElementById('forum-post-modal-desc').textContent = parent
       ? `Start a new post inside # ${parent.name}.`
       : 'Start a new post inside this forum.';
     document.getElementById('forum-post-title').value = '';
     document.getElementById('forum-post-tag').value = '';
     document.getElementById('forum-post-body').value = '';
+    document.getElementById('forum-post-body-group').style.display = '';
+    document.getElementById('forum-post-submit-btn').textContent = 'Create Post';
     if (modal) modal.style.display = 'flex';
     setTimeout(() => document.getElementById('forum-post-title')?.focus(), 20);
   });
   document.getElementById('forum-post-cancel-btn')?.addEventListener('click', () => {
     document.getElementById('forum-post-modal').style.display = 'none';
+    this._editingForumPostCode = null;
   });
   document.getElementById('forum-post-modal')?.addEventListener('click', (e) => {
     if (e.target.id === 'forum-post-modal') {
       document.getElementById('forum-post-modal').style.display = 'none';
+      this._editingForumPostCode = null;
     }
   });
   document.getElementById('forum-post-submit-btn')?.addEventListener('click', () => {
     const parentCode = this._forumView?.parentCode;
+    const editingCode = this._editingForumPostCode;
     const title = document.getElementById('forum-post-title')?.value.trim() || '';
     const tag = document.getElementById('forum-post-tag')?.value.trim() || '';
     const body = document.getElementById('forum-post-body')?.value.trim() || '';
-    if (!parentCode || !title || !body) {
+    if (!parentCode || !title || (!editingCode && !body)) {
       this._showToast('Title and original post are required', 'error');
+      return;
+    }
+    if (editingCode) {
+      this.socket.emit('update-forum-post-meta', { code: editingCode, title, tag }, (res) => {
+        if (!res) return;
+        if (res.error) return this._showToast(res.error, 'error');
+        document.getElementById('forum-post-modal').style.display = 'none';
+        this._editingForumPostCode = null;
+        const channel = this.channels.find(c => c.code === editingCode);
+        if (channel) {
+          channel.name = title;
+          channel.category = tag || null;
+        }
+        this._renderChannels?.();
+        if (parentCode) this.socket.emit('get-forum-overview', { code: parentCode });
+        this._showToast('Forum post updated', 'success');
+      });
       return;
     }
     this.socket.emit('create-forum-post', { parentCode, title, tag, body }, (res) => {
       if (!res) return;
       if (res.error) return this._showToast(res.error, 'error');
       document.getElementById('forum-post-modal').style.display = 'none';
+      this._editingForumPostCode = null;
       if (res.channel && !this.channels.find(c => c.code === res.channel.code)) {
         this.channels.push(res.channel);
         this._renderChannels();
@@ -2340,6 +2365,13 @@ _setupUI() {
     cleanupSize.addEventListener('change', () => {
       const val = Math.max(0, Math.min(100000, parseInt(cleanupSize.value) || 0));
       cleanupSize.value = val;
+    });
+  }
+  const forumClosedDelete = document.getElementById('forum-closed-delete-days');
+  if (forumClosedDelete) {
+    forumClosedDelete.addEventListener('change', () => {
+      const val = Math.max(0, Math.min(3650, parseInt(forumClosedDelete.value) || 0));
+      forumClosedDelete.value = val;
     });
   }
 

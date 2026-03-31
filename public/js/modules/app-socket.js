@@ -22,6 +22,21 @@ _setupSocketListeners() {
     }
   });
 
+  this.socket.on('forum-post-updated', (data) => {
+    if (data?.parentCode && data.parentCode === this._forumView?.parentCode) {
+      this.socket.emit('get-forum-overview', { code: data.parentCode });
+    }
+  });
+
+  this.socket.on('forum-post-state', (data) => {
+    if (!data?.code) return;
+    const channel = this.channels?.find(c => c.code === data.code);
+    if (channel) channel.is_closed = data.closed ? 1 : 0;
+    if (this.currentChannel === data.code) {
+      this.switchChannel(data.code);
+    }
+  });
+
   // Authoritative user info pushed by server on every connect
   this.socket.on('session-info', (data) => {
     this.user = { ...this.user, ...data };

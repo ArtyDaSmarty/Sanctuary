@@ -19,6 +19,7 @@ const {
   getUploadUrl,
   isSafeUploadName,
   migrateLocalUploadsToActiveStorage,
+  purgeDeletedAttachments,
   restoreUploadsFromDirectory,
   stagePendingRestore,
   storeUploadBuffer,
@@ -2535,6 +2536,13 @@ initFcm(DATA_DIR);
 app.set('io', io);   // expose to auth routes (session invalidation on password change)
 setupSocketHandlers(io, db);
 registerProcessCleanup();
+purgeDeletedAttachments(db).then((result) => {
+  if (result?.deleted > 0) {
+    console.log(`🗑️  Removed ${result.deleted} legacy deleted attachments`);
+  }
+}).catch((err) => {
+  console.error('Failed to purge legacy deleted attachments:', err?.message || err);
+});
 
 // ── Auto-cleanup interval (runs every 15 minutes) ───────
 async function runAutoCleanup() {
@@ -2543,12 +2551,30 @@ async function runAutoCleanup() {
       const row = db.prepare('SELECT value FROM server_settings WHERE key = ?').get(key);
       return row ? row.value : null;
     };
+    const extractUploadNames = (content = '') => {
+      const matches = String(content || '').match(/\/uploads\/([\w.-]+)/g) || [];
+      return [...new Set(matches.map(entry => entry.replace('/uploads/', '')).filter(Boolean))];
+    };
+    const deleteForumPostById = (postId) => {
+      const contents = db.prepare('SELECT content FROM messages WHERE channel_id = ?').all(postId);
+      for (const row of contents) {
+        for (const name of extractUploadNames(row.content)) {
+          deleteUploadByName(name).catch(() => {});
+        }
+      }
+      db.prepare('DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE channel_id = ?)').run(postId);
+      db.prepare('DELETE FROM pinned_messages WHERE channel_id = ?').run(postId);
+      db.prepare('DELETE FROM messages WHERE channel_id = ?').run(postId);
+      db.prepare('DELETE FROM channel_members WHERE channel_id = ?').run(postId);
+      db.prepare('DELETE FROM channels WHERE id = ?').run(postId);
+    };
 
     const enabled = getSetting('cleanup_enabled');
     if (enabled !== 'true') return;
 
     const maxAgeDays = parseInt(getSetting('cleanup_max_age_days') || '0');
     const maxSizeMb = parseInt(getSetting('cleanup_max_size_mb') || '0');
+    const forumClosedDeleteDays = parseInt(getSetting('forum_closed_delete_days') || '0');
     let totalDeleted = 0;
 
     // 1. Delete messages older than N days (skip archived/protected messages and exempt channels)
@@ -2589,6 +2615,21 @@ async function runAutoCleanup() {
           }
           totalDeleted += oldestIds.length;
         }
+      }
+    }
+
+    if (forumClosedDeleteDays > 0) {
+      const closedPosts = db.prepare(`
+        SELECT id
+        FROM channels
+        WHERE parent_channel_id IS NOT NULL
+          AND is_closed = 1
+          AND closed_at IS NOT NULL
+          AND datetime(closed_at) <= datetime('now', ?)
+      `).all(`-${forumClosedDeleteDays} days`);
+      for (const post of closedPosts) deleteForumPostById(post.id);
+      if (closedPosts.length > 0) {
+        console.log(`🗑️  Auto-cleanup: deleted ${closedPosts.length} closed forum post${closedPosts.length === 1 ? '' : 's'}`);
       }
     }
 

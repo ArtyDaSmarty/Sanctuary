@@ -498,6 +498,43 @@ async function cleanupActiveUploads({ protectedFiles = new Set(), cutoff }) {
   return { uploadsDeleted, deletedAttachmentsDeleted };
 }
 
+async function purgeDeletedAttachments(db) {
+  const config = getStorageConfig(db);
+  let deleted = 0;
+
+  if (config.provider === 'local') {
+    if (!fs.existsSync(DELETED_ATTACHMENTS_DIR)) return { deleted: 0 };
+    for (const file of fs.readdirSync(DELETED_ATTACHMENTS_DIR, { withFileTypes: true })) {
+      if (!file.isFile() || !isSafeUploadName(file.name)) continue;
+      try {
+        fs.unlinkSync(path.join(DELETED_ATTACHMENTS_DIR, file.name));
+        deleted++;
+      } catch { /* ignore legacy cleanup failures */ }
+    }
+    return { deleted };
+  }
+
+  ensureS3Config(config);
+  const deletedPrefix = buildObjectKey('', 'deleted-attachments', config);
+  const deletes = [];
+  for (const obj of await listS3Objects('deleted-attachments', config)) {
+    if (!obj?.Key || !obj.Key.startsWith(deletedPrefix)) continue;
+    deletes.push({ Key: obj.Key });
+  }
+
+  for (let i = 0; i < deletes.length; i += 1000) {
+    const chunk = deletes.slice(i, i + 1000);
+    if (!chunk.length) continue;
+    await getS3Client(config).send(new DeleteObjectsCommand({
+      Bucket: config.s3.bucket,
+      Delete: { Objects: chunk, Quiet: true }
+    }));
+    deleted += chunk.length;
+  }
+
+  return { deleted };
+}
+
 async function testS3Connection(overrides = {}) {
   const base = getStorageConfig();
   const config = {
@@ -701,6 +738,7 @@ module.exports = {
   isSafeUploadName,
   migrateLocalUploadsToActiveStorage,
   moveUploadToDeleted,
+  purgeDeletedAttachments,
   readStorageSettings,
   restoreUploadsFromDirectory,
   clearStorageSettings,

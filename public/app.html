@@ -386,17 +386,24 @@
           <div class="forum-browser-columns">
             <section class="forum-browser-section">
               <div class="forum-browser-section-header">
-                <h3>Forums You Are In</h3>
+                <h3>Open Posts You Are In</h3>
                 <span id="forum-joined-count" class="forum-browser-count">0</span>
               </div>
               <div id="forum-joined-list" class="forum-card-grid"></div>
             </section>
             <section class="forum-browser-section">
               <div class="forum-browser-section-header">
-                <h3>Forums You Are Not In</h3>
+                <h3>Open Posts You Are Not In</h3>
                 <span id="forum-available-count" class="forum-browser-count">0</span>
               </div>
               <div id="forum-available-list" class="forum-card-grid"></div>
+            </section>
+            <section class="forum-browser-section">
+              <div class="forum-browser-section-header">
+                <h3>Closed Posts</h3>
+                <span id="forum-closed-count" class="forum-browser-count">0</span>
+              </div>
+              <div id="forum-closed-list" class="forum-card-grid"></div>
             </section>
           </div>
         </div>
@@ -734,7 +741,7 @@
 
   <div class="modal-overlay" id="forum-post-modal" style="display:none">
     <div class="modal" style="max-width:520px">
-      <h3>Create Forum Post</h3>
+      <h3 id="forum-post-modal-title">Create Forum Post</h3>
       <p class="modal-desc" id="forum-post-modal-desc">Start a new post inside this forum.</p>
       <div class="form-group">
         <label for="forum-post-title">Title</label>
@@ -744,7 +751,7 @@
         <label for="forum-post-tag">Tag</label>
         <input type="text" id="forum-post-tag" class="input" maxlength="30" placeholder="Optional tag">
       </div>
-      <div class="form-group" style="margin-top:10px">
+      <div class="form-group" id="forum-post-body-group" style="margin-top:10px">
         <label for="forum-post-body">Original Post</label>
         <textarea id="forum-post-body" class="search-input" maxlength="2000" placeholder="What should people see when they open this post?" style="min-height:140px;resize:vertical"></textarea>
       </div>
@@ -1643,6 +1650,11 @@
             <input type="number" id="cleanup-max-size" min="0" max="100000" value="0" class="settings-number-input">
           </label>
           <small class="settings-hint">Trim oldest messages when DB exceeds N MB (0 = off)</small>
+          <label class="select-row">
+            <span>Delete Closed Posts After (days)</span>
+            <input type="number" id="forum-closed-delete-days" min="0" max="3650" value="0" class="settings-number-input">
+          </label>
+          <small class="settings-hint">Closed forum posts are removed after this many days (0 = off)</small>
           <button class="btn-sm btn-full" id="run-cleanup-now-btn" style="margin-top:4px;">🧹 Run Cleanup Now</button>
         </div>
         <div class="admin-settings" id="section-session" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">

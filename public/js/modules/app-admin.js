@@ -322,6 +322,10 @@ _applyServerSettings() {
     if (cleanupSize && this.serverSettings.cleanup_max_size_mb) {
       cleanupSize.value = this.serverSettings.cleanup_max_size_mb;
     }
+    const forumClosedDelete = document.getElementById('forum-closed-delete-days');
+    if (forumClosedDelete && this.serverSettings.forum_closed_delete_days !== undefined) {
+      forumClosedDelete.value = this.serverSettings.forum_closed_delete_days || '0';
+    }
     const maxUpload = document.getElementById('max-upload-mb');
     if (maxUpload) {
       maxUpload.value = this.serverSettings.max_upload_mb || '25';
@@ -442,6 +446,7 @@ _snapshotAdminSettings() {
     cleanup_enabled: this.serverSettings.cleanup_enabled || 'false',
     cleanup_max_age_days: this.serverSettings.cleanup_max_age_days || '0',
     cleanup_max_size_mb: this.serverSettings.cleanup_max_size_mb || '0',
+    forum_closed_delete_days: this.serverSettings.forum_closed_delete_days || '0',
     whitelist_enabled: this.serverSettings.whitelist_enabled || 'false',
     max_upload_mb: this.serverSettings.max_upload_mb || '25',
     max_sound_kb: this.serverSettings.max_sound_kb || '1024',
@@ -506,6 +511,11 @@ _saveAdminSettings() {
   const cleanSize = String(Math.max(0, Math.min(100000, parseInt(document.getElementById('cleanup-max-size')?.value) || 0)));
   if (cleanSize !== (snap.cleanup_max_size_mb || '0')) {
     this.socket.emit('update-server-setting', { key: 'cleanup_max_size_mb', value: cleanSize });
+    changed = true;
+  }
+  const forumClosedDelete = String(Math.max(0, Math.min(3650, parseInt(document.getElementById('forum-closed-delete-days')?.value) || 0)));
+  if (forumClosedDelete !== (snap.forum_closed_delete_days || '0')) {
+    this.socket.emit('update-server-setting', { key: 'forum_closed_delete_days', value: forumClosedDelete });
     changed = true;
   }
   const wlEnabled = document.getElementById('whitelist-enabled')?.checked ? 'true' : 'false';
@@ -595,6 +605,8 @@ _cancelAdminSettings() {
     if (ca) ca.value = snap.cleanup_max_age_days;
     const cs = document.getElementById('cleanup-max-size');
     if (cs) cs.value = snap.cleanup_max_size_mb;
+    const fcd = document.getElementById('forum-closed-delete-days');
+    if (fcd) fcd.value = snap.forum_closed_delete_days || '0';
     const wl = document.getElementById('whitelist-enabled');
     if (wl) wl.checked = snap.whitelist_enabled === 'true';
     const mu = document.getElementById('max-upload-mb');

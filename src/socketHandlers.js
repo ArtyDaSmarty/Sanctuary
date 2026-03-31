@@ -6,6 +6,7 @@ const bcrypt = require('bcryptjs');
 const webpush = require('web-push');
 const { sendFcm, isFcmEnabled } = require('./fcm');
 const { DATA_DIR, UPLOADS_DIR, DELETED_ATTACHMENTS_DIR } = require('./paths');
+const { deleteUploadByName } = require('./storage');
 const HAVEN_VERSION = require('../package.json').version;
 
 // ── Normalize SQLite timestamps to UTC ISO 8601 ────────
@@ -1049,7 +1050,8 @@ function setupSocketHandlers(io, db) {
                  c.code_visibility, c.code_mode, c.code_rotation_type, c.code_rotation_interval,
                  c.parent_channel_id, c.position, c.is_private, c.expires_at,
                  c.streams_enabled, c.music_enabled, c.media_enabled, c.slow_mode_interval, c.category, c.sort_alphabetical,
-                 c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate
+                 c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate,
+                 c.is_closed, c.closed_at
           FROM channels c
           WHERE c.is_dm = 0
           UNION
@@ -1057,7 +1059,8 @@ function setupSocketHandlers(io, db) {
                  c.code_visibility, c.code_mode, c.code_rotation_type, c.code_rotation_interval,
                  c.parent_channel_id, c.position, c.is_private, c.expires_at,
                  c.streams_enabled, c.music_enabled, c.media_enabled, c.slow_mode_interval, c.category, c.sort_alphabetical,
-                 c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate
+                 c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate,
+                 c.is_closed, c.closed_at
           FROM channels c
           JOIN channel_members cm ON c.id = cm.channel_id
           WHERE cm.user_id = ? AND c.is_dm = 1
@@ -1074,7 +1077,8 @@ function setupSocketHandlers(io, db) {
                  c.code_visibility, c.code_mode, c.code_rotation_type, c.code_rotation_interval,
                  c.parent_channel_id, c.position, c.is_private, c.expires_at,
                  c.streams_enabled, c.music_enabled, c.media_enabled, c.slow_mode_interval, c.category, c.sort_alphabetical,
-                 c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate
+                 c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate,
+                 c.is_closed, c.closed_at
           FROM channels c
           JOIN channel_members cm ON c.id = cm.channel_id
           WHERE cm.user_id = ?
@@ -1836,7 +1840,7 @@ function setupSocketHandlers(io, db) {
       const activeMute = db.prepare(
         'SELECT id, expires_at FROM mutes WHERE user_id = ? AND expires_at > datetime(\'now\') ORDER BY expires_at DESC LIMIT 1'
       ).get(socket.user.id);
-      const channel = db.prepare('SELECT id, name, slow_mode_interval, text_enabled, voice_enabled, media_enabled, special_section, is_dm, server_id FROM channels WHERE code = ?').get(code);
+      const channel = db.prepare('SELECT id, name, slow_mode_interval, text_enabled, voice_enabled, media_enabled, special_section, is_dm, server_id, parent_channel_id, is_closed FROM channels WHERE code = ?').get(code);
       if (activeMute && channel && !channel.is_dm) {
         const remaining = Math.ceil((new Date(activeMute.expires_at + 'Z') - Date.now()) / 60000);
         return socket.emit('error-msg', `You are muted for ${remaining} more minute${remaining !== 1 ? 's' : ''}`);
@@ -1863,6 +1867,12 @@ function setupSocketHandlers(io, db) {
         && !userHasServerPermission(socket.user.id, 'manage_server', channel.server_id)
         && !userHasPermission(socket.user.id, 'create_channel', channel.id)) {
         return socket.emit('error-msg', 'You do not have permission to post in Admin Announcements');
+      }
+      if (channel.is_closed && channel.parent_channel_id) {
+        const parent = db.prepare('SELECT channel_type FROM channels WHERE id = ?').get(channel.parent_channel_id);
+        if (parent?.channel_type === 'forum') {
+          return socket.emit('error-msg', 'This forum post is closed');
+        }
       }
 
       // Block text messages when text is disabled (allow media uploads if media is enabled)
@@ -3250,7 +3260,7 @@ function setupSocketHandlers(io, db) {
 
     // ═══════════════ DELETE MESSAGE ═════════════════════════
 
-    socket.on('delete-message', (data) => {
+    socket.on('delete-message', async (data) => {
       if (!data || typeof data !== 'object') return;
       if (!isInt(data.messageId)) return;
 
@@ -3302,17 +3312,9 @@ function setupSocketHandlers(io, db) {
         return socket.emit('error-msg', 'Failed to delete message');
       }
 
-      // Move any uploaded files referenced in the message to the deleted-attachments
-      // folder so they're preserved temporarily and swept by auto-cleanup later.
-      const uploadRe = /\/uploads\/((?!deleted-attachments)[\w\-.]+)/g;
-      let m;
-      while ((m = uploadRe.exec(msg.content || '')) !== null) {
-        const src = path.join(UPLOADS_DIR, m[1]);
-        const dst = path.join(DELETED_ATTACHMENTS_DIR, m[1]);
-        if (fs.existsSync(src)) {
-          try { fs.renameSync(src, dst); } catch { /* file locked or already moved */ }
-        }
-      }
+      const uploadMatches = String(msg.content || '').match(/\/uploads\/([\w.-]+)/g) || [];
+      const uploadNames = [...new Set(uploadMatches.map(entry => entry.replace('/uploads/', '')).filter(Boolean))];
+      await Promise.allSettled(uploadNames.map(name => deleteUploadByName(name)));
 
       io.to(`channel:${code}`).emit('message-deleted', {
         channelCode: code,
@@ -6829,12 +6831,14 @@ function setupSocketHandlers(io, db) {
         || userHasPermission(socket.user.id, 'create_channel', parent.id);
 
       const posts = db.prepare(`
-        SELECT c.id, c.code, c.name, c.category, c.is_private, c.created_at, c.created_by,
+        SELECT c.id, c.code, c.name, c.category, c.is_private, c.created_at, c.created_by, c.is_closed, c.closed_at,
+               (SELECT MAX(m.id) FROM messages m WHERE m.channel_id = c.id) AS latest_message_id,
+               (SELECT MAX(m.created_at) FROM messages m WHERE m.channel_id = c.id) AS latest_message_at,
                COALESCE(u.display_name, u.username, 'Unknown') as author
         FROM channels c
         LEFT JOIN users u ON c.created_by = u.id
         WHERE c.parent_channel_id = ?
-        ORDER BY c.position, c.created_at DESC, c.id DESC
+        ORDER BY COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.channel_id = c.id), c.id) DESC, c.position, c.id DESC
       `).all(parent.id).map(post => {
         const isMember = socket.user.isAdmin
           || !!db.prepare('SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?').get(post.id, socket.user.id);
@@ -6855,6 +6859,11 @@ function setupSocketHandlers(io, db) {
           || post.created_by === socket.user.id
           || userHasPermission(socket.user.id, 'manage_sub_channels', parent.id)
           || userHasPermission(socket.user.id, 'delete_message', post.id);
+        const canManage = socket.user.isAdmin
+          || post.created_by === socket.user.id
+          || userHasPermission(socket.user.id, 'manage_sub_channels', parent.id)
+          || userHasPermission(socket.user.id, 'create_forum_posts', parent.id)
+          || userHasPermission(socket.user.id, 'create_channel', parent.id);
         return {
           id: post.id,
           code: post.code,
@@ -6866,6 +6875,11 @@ function setupSocketHandlers(io, db) {
           preview: sanitizeText(originalPost?.content || '').slice(0, 180),
           messageCount,
           canDelete,
+          canEdit: canManage,
+          canClose: canManage,
+          isClosed: !!post.is_closed,
+          latestMessageId: post.latest_message_id || 0,
+          latestMessageAt: post.latest_message_at || post.created_at,
           unreadCount: latestId > lastRead
             ? (db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE channel_id = ? AND id > ? AND user_id != ?').get(post.id, lastRead, socket.user.id)?.cnt || 0)
             : 0
@@ -6903,7 +6917,8 @@ function setupSocketHandlers(io, db) {
                c.code_visibility, c.code_mode, c.code_rotation_type, c.code_rotation_interval,
                c.parent_channel_id, c.position, c.is_private, c.expires_at,
                c.streams_enabled, c.music_enabled, c.media_enabled, c.slow_mode_interval, c.category, c.sort_alphabetical,
-               c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate
+               c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate,
+               c.is_closed, c.closed_at
         FROM channels c
         LEFT JOIN channels p ON p.id = c.parent_channel_id
         WHERE c.id = ?
@@ -7003,7 +7018,8 @@ function setupSocketHandlers(io, db) {
                  c.code_visibility, c.code_mode, c.code_rotation_type, c.code_rotation_interval,
                  c.parent_channel_id, c.position, c.is_private, c.expires_at,
                  c.streams_enabled, c.music_enabled, c.media_enabled, c.slow_mode_interval, c.category, c.sort_alphabetical,
-                 c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate
+                 c.cleanup_exempt, c.channel_type, c.voice_user_limit, c.notification_type, c.voice_enabled, c.text_enabled, c.voice_bitrate,
+                 c.is_closed, c.closed_at
           FROM channels c
           LEFT JOIN channels p ON p.id = c.parent_channel_id
           WHERE c.id = ?
@@ -7057,6 +7073,64 @@ function setupSocketHandlers(io, db) {
         console.error('Delete forum post error:', err);
         cb?.({ error: 'Failed to delete forum post' });
       }
+    });
+
+    socket.on('update-forum-post-meta', (data, cb) => {
+      if (!data || typeof data !== 'object') return cb?.({ error: 'Invalid request' });
+      const code = typeof data.code === 'string' ? data.code.trim() : '';
+      const title = typeof data.title === 'string' ? data.title.trim() : '';
+      const tag = typeof data.tag === 'string' ? data.tag.trim().slice(0, 30) : '';
+      if (!code || !/^[a-f0-9]{8}$/i.test(code)) return cb?.({ error: 'Invalid forum post' });
+      if (!title || title.length > 50) return cb?.({ error: 'Title must be 1-50 characters' });
+
+      const post = db.prepare('SELECT * FROM channels WHERE code = ? AND is_dm = 0').get(code);
+      if (!post || !post.parent_channel_id) return cb?.({ error: 'Forum post not found' });
+      const parent = db.prepare('SELECT * FROM channels WHERE id = ?').get(post.parent_channel_id);
+      if (!parent || parent.channel_type !== 'forum') return cb?.({ error: 'Forum post not found' });
+
+      const canManage = socket.user.isAdmin
+        || post.created_by === socket.user.id
+        || userHasPermission(socket.user.id, 'manage_sub_channels', parent.id)
+        || userHasPermission(socket.user.id, 'create_forum_posts', parent.id)
+        || userHasPermission(socket.user.id, 'create_channel', parent.id);
+      if (!canManage) return cb?.({ error: 'You do not have permission to edit this post' });
+
+      db.prepare('UPDATE channels SET name = ?, category = ? WHERE id = ?').run(title, tag || null, post.id);
+      cb?.({ ok: true, parentCode: parent.code, code });
+      io.to(`channel:${parent.code}`).emit('forum-post-updated', { parentCode: parent.code, code });
+      broadcastChannelLists();
+    });
+
+    socket.on('set-forum-post-closed', (data, cb) => {
+      if (!data || typeof data !== 'object') return cb?.({ error: 'Invalid request' });
+      const code = typeof data.code === 'string' ? data.code.trim() : '';
+      const closed = !!data.closed;
+      if (!code || !/^[a-f0-9]{8}$/i.test(code)) return cb?.({ error: 'Invalid forum post' });
+
+      const post = db.prepare('SELECT * FROM channels WHERE code = ? AND is_dm = 0').get(code);
+      if (!post || !post.parent_channel_id) return cb?.({ error: 'Forum post not found' });
+      const parent = db.prepare('SELECT * FROM channels WHERE id = ?').get(post.parent_channel_id);
+      if (!parent || parent.channel_type !== 'forum') return cb?.({ error: 'Forum post not found' });
+
+      const canManage = socket.user.isAdmin
+        || post.created_by === socket.user.id
+        || userHasPermission(socket.user.id, 'manage_sub_channels', parent.id)
+        || userHasPermission(socket.user.id, 'create_forum_posts', parent.id)
+        || userHasPermission(socket.user.id, 'create_channel', parent.id);
+      if (!canManage) return cb?.({ error: 'You do not have permission to update this post' });
+
+      db.prepare(`
+        UPDATE channels
+        SET is_closed = ?,
+            closed_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+            closed_by = CASE WHEN ? = 1 THEN ? ELSE NULL END
+        WHERE id = ?
+      `).run(closed ? 1 : 0, closed ? 1 : 0, closed ? 1 : 0, socket.user.id, post.id);
+
+      cb?.({ ok: true, parentCode: parent.code, code, closed });
+      io.to(`channel:${parent.code}`).emit('forum-post-updated', { parentCode: parent.code, code, closed });
+      io.to(`channel:${code}`).emit('forum-post-state', { code, closed });
+      broadcastChannelLists();
     });
 
     socket.on('toggle-channel-permission', (data) => {

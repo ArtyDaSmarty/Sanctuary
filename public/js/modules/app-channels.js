@@ -13,6 +13,8 @@ async switchChannel(code) {
   this.currentChannel = code;
   this._coupledToBottom = true;
   const channel = this.channels.find(c => c.code === code);
+  const parentChannel = channel?.parent_channel_id ? this.channels.find(c => c.id === channel.parent_channel_id) : null;
+  const effectiveServerId = channel?.server_id || parentChannel?.server_id || null;
   if (channel) {
     if (channel.is_dm) {
       this.sidebarView = 'dms';
@@ -20,7 +22,7 @@ async switchChannel(code) {
       this.sidebarView = 'announcements';
     } else {
       this.sidebarView = 'servers';
-      if (channel.server_id) this.currentServerId = channel.server_id;
+      if (effectiveServerId) this.currentServerId = effectiveServerId;
     }
   }
   const isDm = channel && channel.is_dm;
@@ -94,7 +96,8 @@ async switchChannel(code) {
   const _mediaOff = channel && channel.media_enabled === 0;
   const _canPostAnnouncements = !!(this.user?.isAdmin || this._hasPerm('manage_server') || this._hasPerm('create_channel'));
   const _readOnlyAnnouncements = !!(isAnnouncementHub && !_canPostAnnouncements);
-  if (msgInputArea) msgInputArea.style.display = ((_textOff && _mediaOff) || _readOnlyAnnouncements) ? 'none' : '';
+  const _closedForumPost = !!(isForumPost && channel?.is_closed);
+  if (msgInputArea) msgInputArea.style.display = ((_textOff && _mediaOff) || _readOnlyAnnouncements || _closedForumPost) ? 'none' : '';
   // Text-only elements
   const _msgInput = document.getElementById('message-input');
   const _sendBtn = document.getElementById('send-btn');
@@ -224,8 +227,10 @@ _renderForumBrowser() {
     return matchesTag && matchesSearch;
   });
 
-  const joined = filtered.filter(post => post.isMember);
-  const available = filtered.filter(post => !post.isMember);
+  const sorted = [...filtered].sort((a, b) => (b.latestMessageId || 0) - (a.latestMessageId || 0) || (b.id || 0) - (a.id || 0));
+  const closed = sorted.filter(post => post.isClosed);
+  const joined = sorted.filter(post => !post.isClosed && post.isMember);
+  const available = sorted.filter(post => !post.isClosed && !post.isMember);
   const tags = [...new Set(posts.map(post => post.tag).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   const tagWrap = document.getElementById('forum-tag-filters');
   if (tagWrap) {
@@ -258,10 +263,12 @@ _renderForumBrowser() {
           <span>${post.messageCount || 0} message${post.messageCount === 1 ? '' : 's'}</span>
         </div>
         <div class="forum-card-footer">
-          <span class="forum-card-status">${post.isMember ? 'Joined' : 'Not joined'}</span>
+          <span class="forum-card-status">${post.isClosed ? 'Closed' : (post.isMember ? 'Joined' : 'Not joined')}</span>
           <div class="forum-card-actions">
+            ${post.canEdit ? `<button class="forum-card-edit" data-code="${this._escapeHtml(post.code)}" data-name="${this._escapeHtml(post.name)}" data-tag="${this._escapeHtml(post.tag || '')}">Edit</button>` : ''}
+            ${post.canClose ? `<button class="forum-card-close" data-code="${this._escapeHtml(post.code)}" data-closed="${post.isClosed ? '1' : '0'}">${post.isClosed ? 'Reopen' : 'Close'}</button>` : ''}
             ${post.canDelete ? `<button class="forum-card-delete" data-code="${this._escapeHtml(post.code)}" data-name="${this._escapeHtml(post.name)}">Delete</button>` : ''}
-            <button class="forum-card-open" data-code="${this._escapeHtml(post.code)}">${post.isMember ? 'Open' : 'Join & Open'}</button>
+            <button class="forum-card-open" data-code="${this._escapeHtml(post.code)}">${post.isClosed ? 'View' : (post.isMember ? 'Open' : 'Join & Open')}</button>
           </div>
         </div>
       </article>
@@ -270,12 +277,16 @@ _renderForumBrowser() {
 
   const joinedList = document.getElementById('forum-joined-list');
   const availableList = document.getElementById('forum-available-list');
+  const closedList = document.getElementById('forum-closed-list');
   const joinedCount = document.getElementById('forum-joined-count');
   const availableCount = document.getElementById('forum-available-count');
+  const closedCount = document.getElementById('forum-closed-count');
   if (joinedList) joinedList.innerHTML = renderCards(joined, 'You have not joined any posts yet.');
   if (availableList) availableList.innerHTML = renderCards(available, 'Nothing else is available right now.');
+  if (closedList) closedList.innerHTML = renderCards(closed, 'No closed posts right now.');
   if (joinedCount) joinedCount.textContent = String(joined.length);
   if (availableCount) availableCount.textContent = String(available.length);
+  if (closedCount) closedCount.textContent = String(closed.length);
 
   document.querySelectorAll('.forum-card, .forum-card-open').forEach(el => {
     el.addEventListener('click', (e) => {
@@ -292,6 +303,20 @@ _renderForumBrowser() {
       const name = e.currentTarget.dataset.name || 'this forum post';
       if (!code) return;
       this._deleteForumPost(code, name);
+    });
+  });
+  document.querySelectorAll('.forum-card-edit').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._openForumPostEditor(e.currentTarget.dataset.code, e.currentTarget.dataset.name || '', e.currentTarget.dataset.tag || '');
+    });
+  });
+  document.querySelectorAll('.forum-card-close').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const code = e.currentTarget.dataset.code;
+      const closed = e.currentTarget.dataset.closed === '1';
+      this._toggleForumPostClosed(code, !closed);
     });
   });
 },
@@ -331,6 +356,34 @@ _deleteForumPost(code, name = 'this forum post') {
       this.socket.emit('get-forum-overview', { code: res.parentCode });
     }
     this._showToast('Forum post deleted', 'success');
+  });
+},
+
+_openForumPostEditor(code, name = '', tag = '') {
+  this._editingForumPostCode = code;
+  const modal = document.getElementById('forum-post-modal');
+  document.getElementById('forum-post-modal-title').textContent = 'Edit Forum Post';
+  document.getElementById('forum-post-modal-desc').textContent = 'Update the title or tag for this forum post.';
+  document.getElementById('forum-post-title').value = name || '';
+  document.getElementById('forum-post-tag').value = tag || '';
+  document.getElementById('forum-post-body').value = '';
+  document.getElementById('forum-post-body-group').style.display = 'none';
+  document.getElementById('forum-post-submit-btn').textContent = 'Save Changes';
+  modal.style.display = 'flex';
+  setTimeout(() => document.getElementById('forum-post-title')?.focus(), 20);
+},
+
+_toggleForumPostClosed(code, closed) {
+  if (!code) return;
+  this.socket.emit('set-forum-post-closed', { code, closed }, (res) => {
+    if (res?.error) return this._showToast(res.error, 'error');
+    if (res?.parentCode && this._forumView?.parentCode === res.parentCode) {
+      this.socket.emit('get-forum-overview', { code: res.parentCode });
+    }
+    const channel = this.channels.find(c => c.code === code);
+    if (channel) channel.is_closed = closed ? 1 : 0;
+    if (this.currentChannel === code) this.switchChannel(code);
+    this._showToast(closed ? 'Forum post closed' : 'Forum post reopened', 'success');
   });
 },
 
@@ -2038,10 +2091,16 @@ _renderInbox() {
     if (channel.special_section === 'announcements') return 'Admin Announcements';
     return `#${this._escapeHtml(channel.name || 'channel')}`;
   };
+  const serverLabel = (channel) => {
+    const server = (this.servers || []).find(s => s.id === channel.server_id);
+    return this._escapeHtml(server?.name || 'Main');
+  };
 
   list.innerHTML = items.map((channel) => {
     const count = this.unreadCounts?.[channel.code] || channel.unreadCount || 0;
-    const messageLabel = `${count} Unread Message${count === 1 ? '' : 's'} In ${channelLabel(channel)}`;
+    const messageLabel = channel.is_dm
+      ? `${count} Unread Message${count === 1 ? '' : 's'} from ${channel.dm_target ? this._escapeHtml(this._getNickname(channel.dm_target.id, channel.dm_target.username)) : 'Direct Messages'} in Direct Messages`
+      : `${count} Unread Message${count === 1 ? '' : 's'} from ${channelLabel(channel)} in ${serverLabel(channel)}`;
     return `
       <div class="inbox-item" data-code="${channel.code}">
         <div class="inbox-item-copy">${messageLabel}</div>
