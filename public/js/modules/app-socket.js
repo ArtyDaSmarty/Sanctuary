@@ -165,29 +165,32 @@ _setupSocketListeners() {
       this.socket.emit('get-messages', { code: this.currentChannel });
       if (currentChannelMeta?.special_section !== 'announcements') {
         this.socket.emit('get-channel-members', { code: this.currentChannel });
-        // Request fresh voice list for this channel
-        this.socket.emit('request-voice-users', { code: this.currentChannel });
+        if (!this.voiceDisabled) {
+          this.socket.emit('request-voice-users', { code: this.currentChannel });
+        }
       }
     }
-    // Re-join voice if we were in voice before reconnect
-    if (this.voice && this.voice.inVoice && this.voice.currentChannel) {
-      this.socket.emit('voice-rejoin', { code: this.voice.currentChannel });
-      if (this.voice.isMuted) this.socket.emit('voice-mute-state', { code: this.voice.currentChannel, muted: true });
-      if (this.voice.isDeafened) this.socket.emit('voice-deafen-state', { code: this.voice.currentChannel, deafened: true });
-    } else {
-      // Check localStorage for saved voice channel (persists across page refreshes / server restarts)
-      try {
-        const savedVoiceChannel = localStorage.getItem('haven_voice_channel');
-        if (savedVoiceChannel && /^[a-f0-9]{8}$/i.test(savedVoiceChannel)) {
-          // Auto-rejoin saved voice channel after delay (wait for channels to load)
-          setTimeout(() => {
-            if (this.voice && !this.voice.inVoice) {
-              console.log('[Voice] Auto-rejoining saved voice channel:', savedVoiceChannel);
-              this.voice.join(savedVoiceChannel);
-            }
-          }, 1500);
-        }
-      } catch {}
+    if (!this.voiceDisabled) {
+      // Re-join voice if we were in voice before reconnect
+      if (this.voice && this.voice.inVoice && this.voice.currentChannel) {
+        this.socket.emit('voice-rejoin', { code: this.voice.currentChannel });
+        if (this.voice.isMuted) this.socket.emit('voice-mute-state', { code: this.voice.currentChannel, muted: true });
+        if (this.voice.isDeafened) this.socket.emit('voice-deafen-state', { code: this.voice.currentChannel, deafened: true });
+      } else {
+        // Check localStorage for saved voice channel (persists across page refreshes / server restarts)
+        try {
+          const savedVoiceChannel = localStorage.getItem('haven_voice_channel');
+          if (savedVoiceChannel && /^[a-f0-9]{8}$/i.test(savedVoiceChannel)) {
+            // Auto-rejoin saved voice channel after delay (wait for channels to load)
+            setTimeout(() => {
+              if (this.voice && !this.voice.inVoice) {
+                console.log('[Voice] Auto-rejoining saved voice channel:', savedVoiceChannel);
+                this.voice.join(savedVoiceChannel);
+              }
+            }, 1500);
+          }
+        } catch {}
+      }
     }
     // Apply any queued status change from when we were disconnected
     if (this._pendingStatus) {
@@ -234,18 +237,20 @@ _setupSocketListeners() {
       // Re-fetch channels in case list changed while backgrounded
       this.socket?.emit('get-channels');
       
-      // Mobile voice fix: check if we should be in voice but got disconnected
-      try {
-        const savedVoiceChannel = localStorage.getItem('haven_voice_channel');
-        if (savedVoiceChannel && this.voice && !this.voice.inVoice && this.socket?.connected) {
-          console.log('[Voice] Mobile foreground — rejoining voice channel:', savedVoiceChannel);
-          setTimeout(() => {
-            if (this.voice && !this.voice.inVoice) {
-              this.voice.join(savedVoiceChannel);
-            }
-          }, 500);
-        }
-      } catch {}
+      if (!this.voiceDisabled) {
+        // Mobile voice fix: check if we should be in voice but got disconnected
+        try {
+          const savedVoiceChannel = localStorage.getItem('haven_voice_channel');
+          if (savedVoiceChannel && this.voice && !this.voice.inVoice && this.socket?.connected) {
+            console.log('[Voice] Mobile foreground — rejoining voice channel:', savedVoiceChannel);
+            setTimeout(() => {
+              if (this.voice && !this.voice.inVoice) {
+                this.voice.join(savedVoiceChannel);
+              }
+            }, 500);
+          }
+        } catch {}
+      }
     }
   });
 
@@ -264,7 +269,7 @@ _setupSocketListeners() {
     document.getElementById('status-ping').textContent = '--';
     // Mobile fix: if we were in voice when the socket dropped, clean up local
     // voice state so the UI resets and auto-rejoin can work on reconnect.
-    if (this.voice && this.voice.inVoice) {
+    if (!this.voiceDisabled && this.voice && this.voice.inVoice) {
       this.voice._softLeave();
       this._updateVoiceButtons(false);
       this._updateVoiceStatus(false);
@@ -332,9 +337,11 @@ _setupSocketListeners() {
     this._updateTabTitle();
     this._updateDesktopBadge();
     this._updateDmSectionBadge();
-    // Request fresh voice counts so sidebar indicators are always correct
-    // (covers cases where initial push arrived before DOM was ready)
-    this.socket.emit('get-voice-counts');
+    if (!this.voiceDisabled) {
+      // Request fresh voice counts so sidebar indicators are always correct
+      // (covers cases where initial push arrived before DOM was ready)
+      this.socket.emit('get-voice-counts');
+    }
 
     // If the channel code rotated while we were disconnected, re-enter with the
     // new code so messages, reactions, and presence start working again.
@@ -620,6 +627,7 @@ _setupSocketListeners() {
   });
 
   this.socket.on('voice-users-update', (data) => {
+    if (this.voiceDisabled) return;
     // Render voice panel unless the user opted to hide it
     if (data.channelCode === this.currentChannel && localStorage.getItem('haven_hide_voice_panel') !== 'true') {
       this._renderVoiceUsers(data.users);
@@ -632,6 +640,7 @@ _setupSocketListeners() {
 
   // Lightweight sidebar voice count — fires for every voice join/leave
   this.socket.on('voice-count-update', (data) => {
+    if (this.voiceDisabled) return;
     if (data.count > 0) {
       this.voiceCounts[data.code] = data.count;
       this.voiceChannelUsers[data.code] = data.users || [];
@@ -716,6 +725,7 @@ _setupSocketListeners() {
 
   // ── Voice kicked ────────────────────────────────
   this.socket.on('voice-kicked', (data) => {
+    if (this.voiceDisabled) return;
     // Server forcibly removed us from voice — tear down locally
     if (this.voice && this.voice.inVoice) {
       this.voice.leave();
