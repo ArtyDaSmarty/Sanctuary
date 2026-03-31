@@ -743,6 +743,7 @@ _setupUI() {
   });
 
   // Voice buttons
+  if (!this.voiceDisabled) {
   document.getElementById('voice-join-btn')?.addEventListener('click', () => this._joinVoice());
   document.getElementById('voice-join-mobile')?.addEventListener('click', () => {
     this._joinVoice();
@@ -1095,6 +1096,8 @@ _setupUI() {
       el.classList.toggle('talking', isTalking);
     });
   };
+
+  }
 
   // Search
   let searchTimeout = null;
@@ -2535,7 +2538,7 @@ _setupServerBar() {
 
   // ── Manage Servers gear button & modal ──────────────
   document.getElementById('manage-servers-btn')?.addEventListener('click', () => {
-    this._openManageServersModal();
+    document.getElementById('open-settings-btn')?.click();
   });
   document.getElementById('manage-servers-close-btn')?.addEventListener('click', () => {
     document.getElementById('manage-servers-modal').style.display = 'none';
@@ -3772,7 +3775,9 @@ _setupServerBar() {
   document.getElementById('add-server-modal')?.addEventListener('click', (e) => {
     if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
   });
-  document.getElementById('manage-servers-btn')?.addEventListener('click', () => this._openManageServersModal());
+  document.getElementById('manage-servers-btn')?.addEventListener('click', () => {
+    document.getElementById('open-settings-btn')?.click();
+  });
   document.getElementById('manage-servers-close-btn')?.addEventListener('click', () => {
     document.getElementById('manage-servers-modal').style.display = 'none';
   });
