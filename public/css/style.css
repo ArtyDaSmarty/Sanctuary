@@ -3963,6 +3963,7 @@ html.rgb-cycling *::after {
   gap: 12px;
   cursor: pointer;
   transition: transform var(--transition), border-color var(--transition), box-shadow var(--transition);
+  position: relative;
 }
 
 .forum-card:hover {
@@ -4020,19 +4021,71 @@ html.rgb-cycling *::after {
   gap: 8px;
 }
 
-.forum-card-delete,
-.forum-card-open {
-  border: 0;
+.forum-card-open,
+.forum-card-settings-btn,
+.forum-card-menu-btn {
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: rgba(255,255,255,0.08);
+  background: var(--bg-tertiary);
   color: var(--text-primary);
   padding: 6px 12px;
   cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
 }
 
-.forum-card-delete {
-  background: rgba(220, 80, 80, 0.14);
-  color: #ffd1d1;
+.forum-card-open:hover,
+.forum-card-settings-btn:hover,
+.forum-card-menu-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.forum-card-settings-wrap {
+  position: relative;
+}
+
+.forum-card-settings-btn {
+  min-width: 38px;
+  padding: 6px 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.forum-card-settings-menu {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 132px;
+  padding: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.35);
+  z-index: 8;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.forum-card-settings-wrap.open .forum-card-settings-menu {
+  display: flex;
+}
+
+.forum-card-menu-btn {
+  border-radius: 10px;
+  text-align: left;
+  justify-content: flex-start;
+}
+
+.forum-card-menu-btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+}
+
+.forum-card-menu-btn.danger:hover {
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg-hover));
+  border-color: var(--danger);
 }
 
 .proxy-settings-toolbar,
