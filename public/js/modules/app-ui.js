@@ -4180,6 +4180,7 @@ _prepareSettingsLayout() {
           <option value="discord">Discord</option>
           <option value="matrix">Matrix</option>
           <option value="fallout">Fallout</option>
+          <option value="terminal">Terminal</option>
           <option value="ffx">Final Fantasy</option>
           <option value="ice">Ice</option>
           <option value="nord">Nord</option>
