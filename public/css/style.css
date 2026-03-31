@@ -837,6 +837,67 @@
 [data-theme="fallout"] .message-input-container { border: 1px solid rgba(20, 254, 23, 0.2); border-radius: 2px; }
 [data-theme="fallout"] ::selection { background: #14fe17; color: #0a0e08; }
 
+/* ─── THEME: Terminal (Monochrome CRT) ─────────────────── */
+[data-theme="terminal"] {
+  --bg-primary:    #050505;
+  --bg-secondary:  #0a0a0a;
+  --bg-tertiary:   #101010;
+  --bg-hover:      #161616;
+  --bg-active:     #1e1e1e;
+  --bg-input:      #020202;
+  --bg-card:       #0c0c0c;
+
+  --accent:        #f5f5f5;
+  --accent-hover:  #ffffff;
+  --accent-dim:    #cfcfcf;
+  --accent-glow:   rgba(255, 255, 255, 0.18);
+
+  --text-primary:  #f2f2f2;
+  --text-secondary:#d0d0d0;
+  --text-muted:    #8a8a8a;
+  --text-link:     #ffffff;
+
+  --border:        #2e2e2e;
+  --border-light:  #4a4a4a;
+
+  --success:       #f0f0f0;
+  --danger:        #d8d8d8;
+  --warning:       #bbbbbb;
+
+  --led-on:        #ffffff;
+  --led-off:       #111111;
+  --led-glow:      rgba(255, 255, 255, 0.45);
+
+  --font-main:     'Share Tech Mono', 'Courier New', monospace;
+  --font-heading:  'Share Tech Mono', 'Courier New', monospace;
+  --font-mono:     'Share Tech Mono', 'Courier New', monospace;
+
+  --theme-logo:    "⌨";
+  --scanline:      repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(255, 255, 255, 0.025) 2px,
+    rgba(255, 255, 255, 0.025) 4px
+  );
+}
+[data-theme="terminal"] .brand-text { color: #f5f5f5; text-shadow: 0 0 8px rgba(255, 255, 255, 0.28); letter-spacing: 0.18em; text-transform: uppercase; }
+[data-theme="terminal"] .server-icon.home { background: #090909; border: 1px solid #f0f0f0; box-shadow: 0 0 10px rgba(255, 255, 255, 0.15); color: #ffffff; }
+[data-theme="terminal"] .channel-item.active::before { background: #f5f5f5; box-shadow: 0 0 7px rgba(255, 255, 255, 0.45); }
+[data-theme="terminal"] .message-avatar, [data-theme="terminal"] .message-avatar-img { border: 1px solid rgba(255, 255, 255, 0.55); border-radius: 2px; filter: grayscale(1) contrast(1.05); }
+[data-theme="terminal"] .inline-code { color: #ffffff; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.16); }
+[data-theme="terminal"] .channel-badge { background: #f2f2f2; color: #050505; }
+[data-theme="terminal"] .sidebar { border-right: 1px solid rgba(255, 255, 255, 0.14); }
+[data-theme="terminal"] .channel-header { border-bottom: 1px solid rgba(255, 255, 255, 0.14); }
+[data-theme="terminal"] .message-row { text-shadow: 0 0 2px rgba(255, 255, 255, 0.08); }
+[data-theme="terminal"] .modal { border: 1px solid rgba(255, 255, 255, 0.22); box-shadow: 0 0 22px rgba(255, 255, 255, 0.08); }
+[data-theme="terminal"] input, [data-theme="terminal"] textarea { border: 1px solid rgba(255, 255, 255, 0.12) !important; }
+[data-theme="terminal"] .message-input-container { border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 2px; }
+[data-theme="terminal"] .btn-send, [data-theme="terminal"] .btn-primary, [data-theme="terminal"] .btn-gold { background: linear-gradient(180deg, #f6f6f6, #cfcfcf); color: #050505; border-color: #ffffff; box-shadow: 0 0 10px rgba(255, 255, 255, 0.1); }
+[data-theme="terminal"] .btn-send:hover, [data-theme="terminal"] .btn-primary:hover, [data-theme="terminal"] .btn-gold:hover { background: linear-gradient(180deg, #ffffff, #dbdbdb); }
+[data-theme="terminal"] .theme-popup, [data-theme="terminal"] .settings-modal, [data-theme="terminal"] .settings-sidebar { backdrop-filter: none; }
+[data-theme="terminal"] ::selection { background: #f2f2f2; color: #050505; }
+
 /* ─── THEME: Scripture (Parchment & Gold) ──────────────── */
 [data-theme="scripture"] {
   --bg-primary:    #1a1610;
