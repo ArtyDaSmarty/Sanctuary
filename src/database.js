@@ -302,6 +302,7 @@ function initDatabase() {
   insertSetting.run('cleanup_enabled', 'false');       // auto-cleanup toggle
   insertSetting.run('cleanup_max_age_days', '0');      // delete messages older than N days (0 = disabled)
   insertSetting.run('cleanup_max_size_mb', '0');       // delete oldest messages when DB exceeds N MB (0 = disabled)
+  insertSetting.run('forum_closed_delete_days', '0');  // delete closed forum posts after N days (0 = disabled)
   insertSetting.run('cleanup_messages_mb', '0');       // delete oldest message bodies until under limit
   insertSetting.run('cleanup_attachments_mb', '0');    // delete oldest attachments until under limit
   insertSetting.run('cleanup_emojis_mb', '0');         // delete oldest custom emojis until under limit
@@ -716,6 +717,9 @@ function initDatabase() {
     { name: 'notification_type',  sql: "ALTER TABLE channels ADD COLUMN notification_type TEXT DEFAULT 'default'" },
     { name: 'voice_enabled',     sql: "ALTER TABLE channels ADD COLUMN voice_enabled INTEGER DEFAULT 1" },
     { name: 'text_enabled',      sql: "ALTER TABLE channels ADD COLUMN text_enabled INTEGER DEFAULT 1" },
+    { name: 'is_closed',         sql: "ALTER TABLE channels ADD COLUMN is_closed INTEGER DEFAULT 0" },
+    { name: 'closed_at',         sql: "ALTER TABLE channels ADD COLUMN closed_at DATETIME DEFAULT NULL" },
+    { name: 'closed_by',         sql: "ALTER TABLE channels ADD COLUMN closed_by INTEGER DEFAULT NULL REFERENCES users(id)" },
   ];
   for (const col of channelQolCols) {
     try { db.prepare(`SELECT ${col.name} FROM channels LIMIT 0`).get(); } catch { db.exec(col.sql); }
