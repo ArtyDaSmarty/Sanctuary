@@ -743,23 +743,23 @@ _setupUI() {
   });
 
   // Voice buttons
-  document.getElementById('voice-join-btn').addEventListener('click', () => this._joinVoice());
+  document.getElementById('voice-join-btn')?.addEventListener('click', () => this._joinVoice());
   document.getElementById('voice-join-mobile')?.addEventListener('click', () => {
     this._joinVoice();
     this._closeMobilePanels();
   });
-  document.getElementById('voice-mute-btn').addEventListener('click', () => this._toggleMute());
-  document.getElementById('voice-deafen-btn').addEventListener('click', () => this._toggleDeafen());
+  document.getElementById('voice-mute-btn')?.addEventListener('click', () => this._toggleMute());
+  document.getElementById('voice-deafen-btn')?.addEventListener('click', () => this._toggleDeafen());
   document.getElementById('voice-mute-btn-header')?.addEventListener('click', () => this._toggleMute());
   document.getElementById('voice-deafen-btn-header')?.addEventListener('click', () => this._toggleDeafen());
-  document.getElementById('voice-leave-sidebar-btn').addEventListener('click', () => this._leaveVoice());
-  document.getElementById('voice-cam-btn').addEventListener('click', () => this._toggleWebcam());
-  document.getElementById('screen-share-btn').addEventListener('click', () => this._toggleScreenShare());
+  document.getElementById('voice-leave-sidebar-btn')?.addEventListener('click', () => this._leaveVoice());
+  document.getElementById('voice-cam-btn')?.addEventListener('click', () => this._toggleWebcam());
+  document.getElementById('screen-share-btn')?.addEventListener('click', () => this._toggleScreenShare());
   document.getElementById('voice-soundboard-btn')?.addEventListener('click', () => this._openSoundModal('soundboard'));
   document.getElementById('voice-listen-together-btn')?.addEventListener('click', () => this._openMusicModal());
-  document.getElementById('screen-share-minimize').addEventListener('click', () => this._hideScreenShare());
-  document.getElementById('screen-share-close').addEventListener('click', () => this._closeScreenShare());
-  document.getElementById('webcam-collapse-btn').addEventListener('click', () => {
+  document.getElementById('screen-share-minimize')?.addEventListener('click', () => this._hideScreenShare());
+  document.getElementById('screen-share-close')?.addEventListener('click', () => this._closeScreenShare());
+  document.getElementById('webcam-collapse-btn')?.addEventListener('click', () => {
     const wc = document.getElementById('webcam-container');
     if (wc) {
       wc.style.display = 'none';
@@ -769,7 +769,7 @@ _setupUI() {
       if (count > 0) this._showWebcamIndicator(count);
     }
   });
-  document.getElementById('webcam-close-btn').addEventListener('click', () => {
+  document.getElementById('webcam-close-btn')?.addEventListener('click', () => {
     this._closeWebcam();
   });
 
@@ -2648,6 +2648,7 @@ _addServer() {
       this._showToast('Server already in your list', 'error');
     }
   }
+  this._selectedSettingsServerId = server?.id || null;
 },
 
 _autoPullServerIcon(url) {
@@ -3719,11 +3720,20 @@ _refreshSelectedServerSettings() {
   const themeSelect = document.getElementById('subserver-theme-select');
   const themeOverride = document.getElementById('subserver-theme-override');
   const homeChannelSelect = document.getElementById('subserver-home-channel');
+  const settingsModal = document.getElementById('settings-modal');
+  const sameServer = this._selectedSettingsServerId === (server?.id || null);
+  const modalOpen = settingsModal?.style.display === 'flex';
+  const hasUnsavedServerCustomization = !!(modalOpen && sameServer && (
+    (nameInput && nameInput.value !== (server?.name || ''))
+    || (themeSelect && themeSelect.value !== (server?.theme || ''))
+    || (themeOverride && themeOverride.checked !== !!server?.theme_force_override)
+    || (homeChannelSelect && homeChannelSelect.value !== String(server?.home_channel_id || ''))
+  ));
   if (label) label.textContent = server?.name || 'No server selected';
-  if (nameInput) nameInput.value = server?.name || '';
-  if (themeSelect) themeSelect.value = server?.theme || '';
-  if (themeOverride) themeOverride.checked = !!server?.theme_force_override;
-  if (homeChannelSelect) {
+  if (!hasUnsavedServerCustomization && nameInput) nameInput.value = server?.name || '';
+  if (!hasUnsavedServerCustomization && themeSelect) themeSelect.value = server?.theme || '';
+  if (!hasUnsavedServerCustomization && themeOverride) themeOverride.checked = !!server?.theme_force_override;
+  if (!hasUnsavedServerCustomization && homeChannelSelect) {
     const serverChannels = (this.channels || []).filter(c => !c.is_dm && !c.special_section && c.server_id === server?.id);
     homeChannelSelect.innerHTML = `<option value="">Select a home channel</option>` + serverChannels.map(ch => `<option value="${ch.id}">${this._escapeHtml(ch.name)}</option>`).join('');
     homeChannelSelect.value = server?.home_channel_id ? String(server.home_channel_id) : '';
