@@ -4197,6 +4197,7 @@ _prepareSettingsLayout() {
           <option value="halo">Halo</option>
           <option value="dracula">Dracula</option>
           <option value="win95">Windows 95</option>
+          <option value="win95dark">Windows 95 Dark</option>
         </select>
       `;
       subserverSection.insertBefore(label, subserverSection.querySelector('.server-icon-upload-area'));
